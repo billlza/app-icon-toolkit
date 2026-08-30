@@ -5,7 +5,7 @@
 use std::{
     error::Error,
     fmt, io,
-    mem::{offset_of, size_of},
+    mem::{align_of, offset_of, size_of},
     os::windows::io::AsRawHandle,
 };
 
@@ -64,8 +64,9 @@ impl Error for RenameError {
 /// Atomically renames a child directory without replacing any destination.
 ///
 /// Both names must be single ordinary path components below `parent`. The
-/// source is opened relative to that capability and the destination remains
-/// relative to the same parent handle throughout the operating-system call.
+/// source is opened relative to that capability. Windows resolves the simple
+/// destination name in the opened source's current directory, so no ambient
+/// absolute path or process current directory participates in publication.
 pub fn rename_directory_no_replace(
     parent: &Dir,
     source_name: &str,
@@ -74,7 +75,7 @@ pub fn rename_directory_no_replace(
     validate_component(source_name)?;
     let destination = encode_component(destination_name)?;
     let source = open_source_directory(parent, source_name)?;
-    let mut rename = RenameInfoBuffer::new(parent, &destination)?;
+    let mut rename = RenameInfoBuffer::new(&destination)?;
     let rename_size = rename.byte_len()?;
 
     call_set_file_information(&source, &mut rename, rename_size).map_err(classify_rename_error)
@@ -169,7 +170,7 @@ struct RenameInfoBuffer {
 }
 
 impl RenameInfoBuffer {
-    fn new(parent: &Dir, name: &[u16]) -> Result<Self, RenameError> {
+    fn new(name: &[u16]) -> Result<Self, RenameError> {
         if name.len() > MAX_FILE_NAME_UNITS {
             return Err(invalid_input("name exceeds 255 UTF-16 code units"));
         }
@@ -185,7 +186,9 @@ impl RenameInfoBuffer {
             anonymous: FILE_RENAME_INFO_0 { Flags: 0 },
             #[cfg(target_pointer_width = "64")]
             alignment_padding: 0,
-            root_directory: parent.as_raw_handle().cast(),
+            // A null root plus a simple name is the documented same-directory
+            // rename form. The source handle establishes that directory.
+            root_directory: std::ptr::null_mut(),
             file_name_length: byte_length,
             file_name,
         })
@@ -205,6 +208,7 @@ impl RenameInfoBuffer {
 }
 
 const _: () = {
+    assert!(align_of::<RenameInfoBuffer>() >= align_of::<FILE_RENAME_INFO>());
     assert!(offset_of!(RenameInfoBuffer, anonymous) == offset_of!(FILE_RENAME_INFO, Anonymous));
     assert!(
         offset_of!(RenameInfoBuffer, root_directory) == offset_of!(FILE_RENAME_INFO, RootDirectory)
@@ -233,7 +237,7 @@ fn call_set_file_information(
     // SAFETY: `source` owns a live Windows handle with DELETE access. The
     // repr(C) buffer's field offsets are compile-time checked against
     // FILE_RENAME_INFO, `rename_size` covers exactly its initialized prefix,
-    // and the parent handle remains borrowed for the duration of this call.
+    // and the simple destination name is stored inside that live buffer.
     let result = unsafe {
         SetFileInformationByHandle(
             source.as_raw_handle().cast(),
@@ -261,14 +265,49 @@ fn classify_rename_error(source: io::Error) -> RenameError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io, sync::Arc, thread};
+    use std::{
+        fs, io,
+        mem::{offset_of, size_of},
+        sync::Arc,
+        thread,
+    };
 
     use cap_std::{ambient_authority, fs::Dir};
     use tempfile::tempdir;
 
-    use super::{RenameError, encode_component, rename_directory_no_replace};
+    use super::{
+        FILE_NAME_BUFFER_UNITS, FILE_RENAME_INFO, FILE_RENAME_INFO_TAIL_UNITS, MAX_FILE_NAME_UNITS,
+        RenameError, RenameInfoBuffer, encode_component, rename_directory_no_replace,
+    };
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+    #[test]
+    fn rename_buffer_covers_the_documented_header_and_name_length() -> TestResult {
+        let name = encode_component("published")?;
+        let rename = RenameInfoBuffer::new(&name)?;
+        let expected_length = size_of::<FILE_RENAME_INFO>() + name.len() * size_of::<u16>();
+
+        assert_eq!(usize::try_from(rename.byte_len()?)?, expected_length);
+        assert!(rename.root_directory.is_null());
+        assert_eq!(&rename.file_name[..name.len()], name);
+        assert!(
+            rename.file_name[name.len()..name.len() + FILE_RENAME_INFO_TAIL_UNITS]
+                .iter()
+                .all(|unit| *unit == 0)
+        );
+
+        let maximum_name = vec![u16::from(b'a'); MAX_FILE_NAME_UNITS];
+        let maximum = RenameInfoBuffer::new(&maximum_name)?;
+        let maximum_length = usize::try_from(maximum.byte_len()?)?;
+        assert!(
+            maximum_length
+                <= offset_of!(RenameInfoBuffer, file_name)
+                    + size_of::<[u16; FILE_NAME_BUFFER_UNITS]>()
+        );
+        assert!(maximum_length <= size_of::<RenameInfoBuffer>());
+        Ok(())
+    }
 
     #[test]
     fn renames_relative_to_parent_without_replacement() -> TestResult {

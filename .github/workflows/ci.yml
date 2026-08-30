@@ -31,6 +31,11 @@ jobs:
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check with minimum supported Rust
         run: cargo +1.88.0 check --locked --workspace --all-targets --all-features
+      - name: Test Windows atomic publication primitive with minimum supported Rust
+        if: runner.os == 'Windows'
+        run: >-
+          cargo +1.88.0 test --locked --package app-icon-windows-fs
+          --all-targets --all-features
       - name: Test with minimum supported Rust
         run: cargo +1.88.0 test --locked --workspace --all-targets --all-features
 
@@ -48,6 +53,11 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test Windows atomic publication primitive
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --locked --package app-icon-windows-fs
+          --all-targets --all-features
       - name: Run tests
         run: cargo test --locked --workspace --all-targets --all-features
       - name: Build documentation
@@ -97,12 +107,12 @@ jobs:
           sudo apt-get install --yes desktop-file-utils icoutils
       - name: Install pinned Android SDK components
         run: |
-          test -n "${ANDROID_HOME:-}"
-          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+          test -n "${ANDROID_SDK_ROOT:-}"
+          test -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
             "build-tools;37.0.0" "platforms;android-37.0"
       - name: Validate Android, Linux, and Windows artifacts
         env:
           ANDROID_BUILD_TOOLS_VERSION: 37.0.0
           ANDROID_PLATFORM: android-37.0
-        run: ANDROID_SDK_ROOT="$ANDROID_HOME" ./scripts/check-native.sh android linux windows
+        run: ./scripts/check-native.sh android linux windows
