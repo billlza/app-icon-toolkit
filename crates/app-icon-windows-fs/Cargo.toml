@@ -13,8 +13,10 @@ publish = false
 [target.'cfg(windows)'.dependencies]
 cap-std.workspace = true
 windows-sys = { workspace = true, features = [
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]

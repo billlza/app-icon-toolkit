@@ -109,8 +109,8 @@ app-icon-mcp ───────> app-icon-engine ───────> app-i
 - `app-icon-mcp` owns JSON Schema DTOs, domain conversion, tool annotations,
   structured failures, concurrency control, and stdio transport.
 - `app-icon-windows-fs` is a private leaf adapter containing the single audited
-  Win32 FFI boundary needed for handle-relative no-replace publication. The
-  other crates continue to forbid unsafe code.
+  Windows native FFI boundary needed for handle-relative no-replace
+  publication. The other crates continue to forbid unsafe code.
 
 There are four exporters but one MCP and one transaction. Splitting by platform
 would duplicate schemas, error mapping, process management, and concurrency

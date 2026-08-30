@@ -42,14 +42,15 @@ The four exporter modules own platform-specific artifact plans and encoders.
 They do not write files. Transaction code owns all I/O and cleanup.
 
 Unix-like hosts use `renameat_with(NOREPLACE)` relative to the parent
-capability. Windows uses `SetFileInformationByHandle(FileRenameInfo)` with
+capability. Windows uses `NtSetInformationFile(FileRenameInformation)` with
 `ReplaceIfExists=false` and the same parent capability handle. Unsupported
 filesystems fail explicitly; there is no ambient absolute-path or copy/delete
 fallback.
 
 The Windows adapter validates the source handle as a non-reparse directory and
-contains the only project-authored unsafe block. Its buffer offsets are checked
-against the Windows SDK binding at compile time.
+denies delete sharing so that link cannot move after validation. The adapter
+contains the only project-authored unsafe block, and its buffer offsets are
+checked against the Windows native API binding at compile time.
 
 ## Concurrency and resources
 
