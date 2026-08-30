@@ -20,8 +20,8 @@ use windows_sys::Win32::{
     },
     Storage::FileSystem::{
         DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        SYNCHRONIZE,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandleEx, SYNCHRONIZE,
     },
     System::IO::{IO_STATUS_BLOCK, IO_STATUS_BLOCK_0},
 };
@@ -31,6 +31,17 @@ const FILE_RENAME_INFO_TAIL_UNITS: usize = (size_of::<FILE_RENAME_INFORMATION>()
     - offset_of!(FILE_RENAME_INFORMATION, FileName))
 .div_ceil(size_of::<u16>());
 const FILE_NAME_BUFFER_UNITS: usize = MAX_FILE_NAME_UNITS + FILE_RENAME_INFO_TAIL_UNITS;
+
+/// Stable object identity for one directory on a Windows volume.
+///
+/// The volume serial number and 128-bit file ID are queried from an open
+/// handle, so callers can distinguish the original staging directory from a
+/// different object that later appears under the same name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryIdentity {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+}
 
 /// A classified failure from the Windows no-replace rename primitive.
 #[derive(Debug)]
@@ -74,15 +85,29 @@ pub fn rename_directory_no_replace(
     parent: &Dir,
     source_name: &str,
     destination_name: &str,
+    expected_identity: DirectoryIdentity,
 ) -> Result<(), RenameError> {
     validate_component(source_name)?;
     let destination = encode_component(destination_name)?;
-    let source = open_source_directory(parent, source_name)?;
+    let source = open_source_directory(parent, source_name).map_err(RenameError::Other)?;
+    let actual_identity = identity_from_file(&source).map_err(RenameError::Other)?;
+    if actual_identity != expected_identity {
+        return Err(invalid_input(
+            "source directory identity changed before publication",
+        ));
+    }
     let mut rename = RenameInfoBuffer::new(parent, &destination)?;
     let rename_size = rename.byte_len()?;
 
     call_nt_set_information(parent, &source, &mut rename, rename_size)
         .map_err(classify_rename_error)
+}
+
+/// Returns the handle-derived identity of a non-reparse child directory.
+pub fn directory_identity(parent: &Dir, name: &str) -> io::Result<DirectoryIdentity> {
+    validate_component(name).map_err(rename_error_into_io)?;
+    let directory = open_source_directory(parent, name)?;
+    identity_from_file(&directory)
 }
 
 fn validate_component(component: &str) -> Result<(), RenameError> {
@@ -133,34 +158,66 @@ fn is_device_suffix(suffix: &str) -> bool {
     )
 }
 
-fn open_source_directory(
-    parent: &Dir,
-    source_name: &str,
-) -> Result<cap_std::fs::File, RenameError> {
+fn open_source_directory(parent: &Dir, source_name: &str) -> io::Result<cap_std::fs::File> {
     let mut options = OpenOptions::new();
     options
         .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
 
-    let source = parent
-        .open_with(source_name, &options)
-        .map_err(RenameError::Other)?;
-    let attributes = source
-        .metadata()
-        .map_err(RenameError::Other)?
-        .file_attributes();
+    let source = parent.open_with(source_name, &options)?;
+    let attributes = source.metadata()?.file_attributes();
     if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
-        return Err(invalid_input("source is not a directory"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source is not a directory",
+        ));
     }
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(invalid_input("source is a reparse point"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source is a reparse point",
+        ));
     }
     Ok(source)
 }
 
+#[allow(unsafe_code)]
+fn identity_from_file(file: &cap_std::fs::File) -> io::Result<DirectoryIdentity> {
+    let mut information = FILE_ID_INFO::default();
+    // SAFETY: `file` owns a live handle opened with FILE_READ_ATTRIBUTES;
+    // `information` is a correctly sized writable FILE_ID_INFO buffer for the
+    // requested FileIdInfo class and remains live for the duration of the call.
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle().cast(),
+            FileIdInfo,
+            std::ptr::from_mut(&mut information).cast(),
+            u32::try_from(size_of::<FILE_ID_INFO>())
+                .map_err(|_| io::Error::other("FILE_ID_INFO size is not representable"))?,
+        )
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(DirectoryIdentity {
+        volume_serial_number: information.VolumeSerialNumber,
+        file_id: information.FileId.Identifier,
+    })
+}
+
 fn invalid_input(message: &'static str) -> RenameError {
     RenameError::Other(io::Error::new(io::ErrorKind::InvalidInput, message))
+}
+
+fn rename_error_into_io(error: RenameError) -> io::Error {
+    match error {
+        RenameError::AlreadyExists => io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the destination already exists",
+        ),
+        RenameError::Unsupported(source) | RenameError::Other(source) => source,
+    }
 }
 
 #[repr(C)]
@@ -299,7 +356,7 @@ mod tests {
 
     use super::{
         FILE_NAME_BUFFER_UNITS, FILE_RENAME_INFO_TAIL_UNITS, FILE_RENAME_INFORMATION,
-        MAX_FILE_NAME_UNITS, RenameError, RenameInfoBuffer, encode_component,
+        MAX_FILE_NAME_UNITS, RenameError, RenameInfoBuffer, directory_identity, encode_component,
         open_source_directory, rename_directory_no_replace,
     };
 
@@ -365,14 +422,36 @@ mod tests {
         fs::create_dir(temporary.path().join("staging"))?;
         fs::write(temporary.path().join("staging/sentinel"), b"complete")?;
         let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
+        let expected_identity = directory_identity(&parent, "staging")?;
 
-        rename_directory_no_replace(&parent, "staging", "published")?;
+        rename_directory_no_replace(&parent, "staging", "published", expected_identity)?;
 
         assert!(!temporary.path().join("staging").exists());
+        assert_eq!(directory_identity(&parent, "published")?, expected_identity);
         assert_eq!(
             fs::read(temporary.path().join("published/sentinel"))?,
             b"complete"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_to_rename_a_replacement_staging_identity() -> TestResult {
+        let temporary = tempdir()?;
+        let staging = temporary.path().join("staging");
+        fs::create_dir(&staging)?;
+        let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
+        let expected_identity = directory_identity(&parent, "staging")?;
+        fs::remove_dir(&staging)?;
+        fs::create_dir(&staging)?;
+
+        let error = rename_directory_no_replace(&parent, "staging", "published", expected_identity)
+            .err()
+            .ok_or_else(|| io::Error::other("replacement staging was unexpectedly published"))?;
+
+        assert!(matches!(error, RenameError::Other(_)));
+        assert!(staging.is_dir());
+        assert!(!temporary.path().join("published").exists());
         Ok(())
     }
 
@@ -390,10 +469,12 @@ mod tests {
                 fs::write(&destination, b"file")?;
             }
             let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
+            let expected_identity = directory_identity(&parent, "staging")?;
 
-            let error = rename_directory_no_replace(&parent, "staging", "published")
-                .err()
-                .ok_or_else(|| io::Error::other("existing destination was replaced"))?;
+            let error =
+                rename_directory_no_replace(&parent, "staging", "published", expected_identity)
+                    .err()
+                    .ok_or_else(|| io::Error::other("existing destination was replaced"))?;
 
             assert!(matches!(error, RenameError::AlreadyExists));
             assert!(temporary.path().join("staging/source").is_file());
@@ -423,8 +504,11 @@ mod tests {
             workers.push(thread::spawn(move || -> Result<(), RenameError> {
                 let parent = Dir::open_ambient_dir(&parent_path, ambient_authority())
                     .map_err(RenameError::Other)?;
+                let source_name = format!("staging-{index}");
+                let expected_identity =
+                    directory_identity(&parent, &source_name).map_err(RenameError::Other)?;
                 worker_barrier.wait();
-                rename_directory_no_replace(&parent, &format!("staging-{index}"), "published")
+                rename_directory_no_replace(&parent, &source_name, "published", expected_identity)
             }));
         }
         barrier.wait();

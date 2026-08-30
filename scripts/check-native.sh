@@ -17,6 +17,7 @@ for requested_profile in "$@"; do
 done
 
 plugin_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$plugin_root"
 temporary_base=${TMPDIR:-/tmp}
 if [ "$temporary_base" != "/" ]; then
   temporary_base=${temporary_base%/}

@@ -125,3 +125,131 @@ jobs:
           ANDROID_BUILD_TOOLS_VERSION: 37.0.0
           ANDROID_PLATFORM: android-37.0
         run: ./scripts/check-native.sh android linux windows
+
+  distribution-plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+      toolchain: ${{ steps.targets.outputs.toolchain }}
+      universal_verify_matrix: ${{ steps.targets.outputs.universal_verify_matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: targets
+        name: Load validated release target contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "matrix=$(python3 scripts/release_targets.py matrix)"
+            echo "toolchain=$(python3 scripts/release_targets.py toolchain)"
+            echo "universal_verify_matrix=$(python3 scripts/release_targets.py universal-verify-matrix)"
+          } >> "$GITHUB_OUTPUT"
+          python3 scripts/release_targets.py verify-about --about about.toml
+
+  distribution:
+    needs: distribution-plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.distribution-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned release toolchain and targets
+        shell: bash
+        run: >-
+          ${{ matrix.python }} scripts/install-release-toolchain.py
+          --plugin-root . --target "${{ matrix.id }}"
+      - name: Install musl native toolchain
+        if: matrix.family == 'linux_musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+      - name: Run native target tests
+        if: matrix.test_target != ''
+        shell: bash
+        env:
+          RELEASE_TOOLCHAIN: ${{ needs.distribution-plan.outputs.toolchain }}
+        run: >-
+          cargo +"$RELEASE_TOOLCHAIN" test --locked --workspace
+          --all-targets --all-features --target "${{ matrix.test_target }}"
+      - name: Build pinned release candidate
+        shell: bash
+        run: >-
+          ${{ matrix.python }} scripts/build-release-binary.py
+          --plugin-root . --target "${{ matrix.id }}"
+      - name: Check release binary architecture and runtime dependencies
+        shell: bash
+        run: >-
+          ${{ matrix.python }} scripts/check-release-binary.py
+          --plugin-root . --target "${{ matrix.id }}"
+          --binary "target/release-candidates/${{ matrix.id }}/${{ matrix.binary_name }}"
+      - name: Validate Windows MSIX asset qualifiers and package manifest
+        if: matrix.family == 'windows_msvc'
+        shell: pwsh
+        run: >-
+          ./scripts/check-msix-assets.ps1
+          -Target "${{ matrix.id }}"
+          -Toolchain "${{ needs.distribution-plan.outputs.toolchain }}"
+          -Binary "target/release-candidates/${{ matrix.id }}/${{ matrix.binary_name }}"
+      - name: Record source timestamp
+        id: source
+        shell: bash
+        run: echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Prepare and smoke-test distribution archive
+        env:
+          PYTHON: ${{ matrix.python }}
+        shell: bash
+        run: >-
+          ${{ matrix.python }} scripts/prepare-release-package.py
+          --plugin-root .
+          --binary "target/release-candidates/${{ matrix.id }}/${{ matrix.binary_name }}"
+          --target "${{ matrix.id }}"
+          --tag v0.0.0-ci
+          --format "${{ matrix.archive_format }}"
+          --output dist
+          --source-date-epoch "${{ steps.source.outputs.epoch }}"
+      - name: Upload Universal2 archive for Intel verification
+        if: matrix.native_verify_runner != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: app-icon-toolkit-${{ matrix.id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  distribution-universal-intel:
+    needs: [distribution-plan, distribution]
+    strategy:
+      matrix: ${{ fromJSON(needs.distribution-plan.outputs.universal_verify_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download exact Universal2 archive from this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "app-icon-toolkit-${{ matrix.id }}" \
+            --dir release-assets
+      - name: Verify and smoke-test the same archive on Intel macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="release-assets/app-icon-toolkit-v0.0.0-ci-${{ matrix.id }}.tar.gz"
+          test -s "$archive"
+          mkdir extracted
+          tar -xzf "$archive" -C extracted
+          python3 scripts/check-release-binary.py \
+            --plugin-root . \
+            --target "${{ matrix.id }}" \
+            --binary extracted/app-icon-toolkit/bin/app-icon-toolkit-mcp
+          python3 scripts/smoke-installed-plugin.py extracted/app-icon-toolkit

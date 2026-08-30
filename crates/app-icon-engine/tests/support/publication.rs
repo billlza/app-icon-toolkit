@@ -4,7 +4,7 @@ use std::io::{self, BufReader};
 use std::path::Path;
 
 use app_icon_domain::ArtifactKind;
-use app_icon_engine::IconService;
+use app_icon_engine::{IconService, PublicationState, RetryAdvice};
 use ico::IconDir;
 use image::{ImageBuffer, ImageReader, Rgba, RgbaImage};
 use serde_json::Value;
@@ -143,7 +143,14 @@ fn concurrent_generation_to_same_output_has_one_atomic_winner() -> TestResult {
             IconService::new()
                 .generate(&worker_root, &worker_job)
                 .map(|_| ())
-                .map_err(|error| error.code().to_owned())
+                .map_err(|error| {
+                    (
+                        error.code().to_owned(),
+                        error.staging_relative_path().map(ToString::to_string),
+                        error.publication_state(),
+                        error.retry_advice(),
+                    )
+                })
         }));
     }
     barrier.wait();
@@ -160,7 +167,14 @@ fn concurrent_generation_to_same_output_has_one_atomic_winner() -> TestResult {
         }
     }
     assert_eq!(successes, 1);
-    assert_eq!(failures, vec!["OUTPUT_EXISTS"]);
+    assert_eq!(failures.len(), 1);
+    let (code, staging_path, publication_state, retry_advice) = &failures[0];
+    assert_eq!(code, "OUTPUT_EXISTS");
+    assert_eq!(*publication_state, Some(PublicationState::NotPublished));
+    assert_eq!(*retry_advice, Some(RetryAdvice::DoNotRetry));
+    let staging_path = staging_path
+        .as_ref()
+        .ok_or_else(|| io::Error::other("losing publisher omitted its preserved staging path"))?;
 
     let output = workspace.path().join("generated");
     let mut expected_paths = expected_paths();
@@ -175,11 +189,9 @@ fn concurrent_generation_to_same_output_has_one_atomic_winner() -> TestResult {
     assert_android_adaptive_xml(&output)?;
     assert_windows_ico(&output)?;
     assert_linux_desktop_entry(&output)?;
-    assert!(
-        snapshot_files(workspace.path())?
-            .keys()
-            .all(|path| !path.contains(".app-icon-toolkit-staging-"))
-    );
+    let preserved_staging = workspace.path().join(staging_path);
+    assert!(preserved_staging.is_dir());
+    assert_eq!(relative_file_paths(&preserved_staging)?, expected_paths);
     Ok(())
 }
 

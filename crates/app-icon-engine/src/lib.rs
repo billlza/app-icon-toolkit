@@ -12,6 +12,6 @@ mod service;
 mod source;
 mod transaction;
 
-pub use error::EngineError;
+pub use error::{EngineError, PublicationState, RetryAdvice};
 pub use report::GenerationReport;
 pub use service::IconService;

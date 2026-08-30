@@ -17,7 +17,7 @@ import zlib
 
 
 PROTOCOL_VERSION = "2025-11-25"
-EXPECTED_ARTIFACTS = 44
+EXPECTED_ARTIFACTS = 101
 STDERR_CAPTURE_LIMIT = 64 * 1024
 DIAGNOSTIC_OVERLAP = 64
 DISALLOWED_DIAGNOSTIC = re.compile(
@@ -386,6 +386,7 @@ def call_arguments(workspace: Path) -> dict[str, object]:
             {"profile": "mac_os_app_icon_set", "icon_set_name": "Assets"},
             {"profile": "android_adaptive", "resource_name": "ic_launcher"},
             {"profile": "windows_ico", "file_stem": "app-icon"},
+            {"profile": "windows_msix_assets"},
             {
                 "profile": "linux_xdg",
                 "application_id": "com.example.IconProbe",
@@ -441,7 +442,7 @@ def run_smoke(plugin_root: Path) -> None:
             )
             plan = structured_content(mcp.response(2))
             profiles = plan.get("profiles")
-            if not isinstance(profiles, list) or len(profiles) != 4:
+            if not isinstance(profiles, list) or len(profiles) != 5:
                 raise RuntimeError(f"plan returned an unexpected profile set: {plan}")
 
             mcp.send(

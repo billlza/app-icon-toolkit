@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "release_toolchain": "1.97.1",
+  "targets": [
+    {
+      "id": "x86_64-unknown-linux-gnu",
+      "runner": "ubuntu-22.04",
+      "rust_targets": ["x86_64-unknown-linux-gnu"],
+      "test_target": "x86_64-unknown-linux-gnu",
+      "archive_format": "tar.gz",
+      "binary_name": "app-icon-toolkit-mcp",
+      "family": "linux_gnu",
+      "python": "python3",
+      "glibc_max": "2.34"
+    },
+    {
+      "id": "x86_64-unknown-linux-musl",
+      "runner": "ubuntu-24.04",
+      "rust_targets": ["x86_64-unknown-linux-musl"],
+      "test_target": "x86_64-unknown-linux-musl",
+      "archive_format": "tar.gz",
+      "binary_name": "app-icon-toolkit-mcp",
+      "family": "linux_musl",
+      "python": "python3"
+    },
+    {
+      "id": "aarch64-unknown-linux-musl",
+      "runner": "ubuntu-24.04-arm",
+      "rust_targets": ["aarch64-unknown-linux-musl"],
+      "test_target": "aarch64-unknown-linux-musl",
+      "archive_format": "tar.gz",
+      "binary_name": "app-icon-toolkit-mcp",
+      "family": "linux_musl",
+      "python": "python3"
+    },
+    {
+      "id": "aarch64-apple-darwin",
+      "runner": "macos-26",
+      "rust_targets": ["aarch64-apple-darwin"],
+      "test_target": "aarch64-apple-darwin",
+      "archive_format": "tar.gz",
+      "binary_name": "app-icon-toolkit-mcp",
+      "family": "macos",
+      "python": "python3",
+      "macos_minimum": "13.0"
+    },
+    {
+      "id": "x86_64-apple-darwin",
+      "runner": "macos-26-intel",
+      "rust_targets": ["x86_64-apple-darwin"],
+      "test_target": "x86_64-apple-darwin",
+      "archive_format": "tar.gz",
+      "binary_name": "app-icon-toolkit-mcp",
+      "family": "macos",
+      "python": "python3",
+      "macos_minimum": "13.0"
+    },
+    {
+      "id": "universal2-apple-darwin",
+      "runner": "macos-26",
+      "rust_targets": ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+      "test_target": null,
+      "archive_format": "tar.gz",
+      "binary_name": "app-icon-toolkit-mcp",
+      "family": "macos_universal2",
+      "python": "python3",
+      "macos_minimum": "13.0",
+      "native_verify_runner": "macos-26-intel"
+    },
+    {
+      "id": "x86_64-pc-windows-msvc",
+      "runner": "windows-latest",
+      "rust_targets": ["x86_64-pc-windows-msvc"],
+      "test_target": "x86_64-pc-windows-msvc",
+      "archive_format": "zip",
+      "binary_name": "app-icon-toolkit-mcp.exe",
+      "family": "windows_msvc",
+      "python": "python"
+    },
+    {
+      "id": "aarch64-pc-windows-msvc",
+      "runner": "windows-11-arm",
+      "rust_targets": ["aarch64-pc-windows-msvc"],
+      "test_target": "aarch64-pc-windows-msvc",
+      "archive_format": "zip",
+      "binary_name": "app-icon-toolkit-mcp.exe",
+      "family": "windows_msvc",
+      "python": "python"
+    }
+  ]
+}

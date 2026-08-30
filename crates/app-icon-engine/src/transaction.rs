@@ -1,5 +1,7 @@
 //! Capability-scoped staging and atomic publication.
 
+mod reconcile;
+
 use std::{
     io,
     io::Write,
@@ -16,9 +18,24 @@ use crate::{
     render,
     source::PreparedSources,
 };
+use reconcile::{EntryState, NativeResult, Resolution, resolve};
 
 const MAX_STAGING_ATTEMPTS: u32 = 128;
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectoryIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(windows)]
+type DirectoryIdentity = app_icon_windows_fs::DirectoryIdentity;
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectoryIdentity;
 
 pub(crate) fn generate_and_publish(
     root: &Dir,
@@ -34,17 +51,73 @@ pub(crate) fn generate_and_publish(
     validate_render_order(plan, &rendered)?;
 
     let staging_name = create_staging_directory(&parent, job.output_directory())?;
+    let staging_path = staging_relative_path(job.output_directory(), &staging_name)?;
+    let staging_identity = directory_identity(&parent, &staging_name).map_err(|source| {
+        EngineError::StagingIdentity {
+            path: job.output_directory().clone(),
+            staging_path: staging_path.clone(),
+            source,
+        }
+    })?;
     let staging_result = write_and_validate_staging(&parent, &staging_name, plan, &rendered);
     if let Err(primary) = staging_result {
-        return cleanup_after_error(&parent, &staging_name, job.output_directory(), primary);
+        return preserve_staging(&staging_path, job.output_directory(), primary);
     }
 
-    match publish_no_replace(&parent, &staging_name, final_name, job.output_directory()) {
-        Ok(()) => Ok(()),
-        Err(primary) => {
-            cleanup_after_error(&parent, &staging_name, job.output_directory(), primary)
+    let native_result = publish_no_replace(
+        &parent,
+        &staging_name,
+        final_name,
+        staging_identity,
+        job.output_directory(),
+    );
+    let native_state = if native_result.is_ok() {
+        NativeResult::Succeeded
+    } else {
+        NativeResult::Failed
+    };
+    let native_description = match &native_result {
+        Ok(()) => "native no-replace rename reported success".to_owned(),
+        Err(error) => error.to_string(),
+    };
+    let primary_code = native_result.as_ref().err().map(EngineError::code);
+    let staging_state = observe_entry(&parent, &staging_name, staging_identity);
+    let final_state = observe_entry(&parent, final_name, staging_identity);
+
+    match resolve(native_state, &staging_state, &final_state) {
+        Resolution::Published => Ok(()),
+        Resolution::NotPublished => match native_result {
+            Err(primary) => preserve_staging(&staging_path, job.output_directory(), primary),
+            Ok(()) => Err(EngineError::PublishOutcomeIndeterminate {
+                path: job.output_directory().clone(),
+                staging_path,
+                native_result: native_description,
+                primary_code,
+                reconciliation_reason:
+                    "state classifier returned not-published after native success".to_owned(),
+            }),
+        },
+        Resolution::Indeterminate(reconciliation_reason) => {
+            Err(EngineError::PublishOutcomeIndeterminate {
+                path: job.output_directory().clone(),
+                staging_path,
+                native_result: native_description,
+                primary_code,
+                reconciliation_reason,
+            })
         }
     }
+}
+
+fn staging_relative_path(
+    output_directory: &RelativePath,
+    staging_name: &str,
+) -> Result<RelativePath, EngineError> {
+    let path = match output_directory.as_str().rsplit_once('/') {
+        Some((parent, _)) => format!("{parent}/{staging_name}"),
+        None => staging_name.to_owned(),
+    };
+    RelativePath::new(path).map_err(EngineError::from)
 }
 
 fn open_output_parent<'a>(
@@ -274,20 +347,59 @@ fn validate_render_order(
     Ok(())
 }
 
-fn cleanup_after_error(
-    parent: &Dir,
-    staging_name: &str,
+fn preserve_staging(
+    staging_path: &RelativePath,
     output_directory: &RelativePath,
     primary: EngineError,
 ) -> Result<(), EngineError> {
-    match parent.remove_dir_all(staging_name) {
-        Ok(()) => Err(primary),
-        Err(source) => Err(EngineError::StagingCleanup {
-            path: output_directory.clone(),
-            primary: primary.to_string(),
-            source,
-        }),
+    Err(EngineError::StagingPreserved {
+        path: output_directory.clone(),
+        staging_path: staging_path.clone(),
+        primary: Box::new(primary),
+    })
+}
+
+fn observe_entry(parent: &Dir, name: &str, expected: DirectoryIdentity) -> EntryState {
+    match parent.symlink_metadata(name) {
+        Ok(metadata) if !metadata.is_dir() || metadata.is_symlink() => EntryState::Different,
+        Ok(_) => match directory_identity(parent, name) {
+            Ok(actual) if actual == expected => EntryState::Expected,
+            Ok(_) => EntryState::Different,
+            Err(source) => EntryState::Unobservable(source.to_string()),
+        },
+        Err(source) if source.kind() == io::ErrorKind::NotFound => EntryState::Missing,
+        Err(source) => EntryState::Unobservable(source.to_string()),
     }
+}
+
+#[cfg(unix)]
+fn directory_identity(parent: &Dir, name: &str) -> io::Result<DirectoryIdentity> {
+    use cap_std::fs::MetadataExt;
+
+    let metadata = parent.symlink_metadata(name)?;
+    if !metadata.is_dir() || metadata.is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staging entry is not a non-symlink directory",
+        ));
+    }
+    Ok(DirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn directory_identity(parent: &Dir, name: &str) -> io::Result<DirectoryIdentity> {
+    app_icon_windows_fs::directory_identity(parent, name)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn directory_identity(_parent: &Dir, _name: &str) -> io::Result<DirectoryIdentity> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "directory identity is unavailable on this target",
+    ))
 }
 
 #[cfg(any(
@@ -339,9 +451,28 @@ fn publish_no_replace(
     parent: &Dir,
     staging_name: &str,
     final_name: &str,
+    expected_identity: DirectoryIdentity,
     output_directory: &RelativePath,
 ) -> Result<(), EngineError> {
     use rustix::fs::{RenameFlags, renameat_with};
+
+    match directory_identity(parent, staging_name) {
+        Ok(actual_identity) if actual_identity == expected_identity => {}
+        Ok(_) => {
+            return Err(EngineError::Publish {
+                path: output_directory.clone(),
+                source: io::Error::other(
+                    "staging directory identity changed immediately before publication",
+                ),
+            });
+        }
+        Err(source) => {
+            return Err(EngineError::Publish {
+                path: output_directory.clone(),
+                source,
+            });
+        }
+    }
 
     match renameat_with(
         parent,
@@ -376,9 +507,15 @@ fn publish_no_replace(
     parent: &Dir,
     staging_name: &str,
     final_name: &str,
+    expected_identity: DirectoryIdentity,
     output_directory: &RelativePath,
 ) -> Result<(), EngineError> {
-    match app_icon_windows_fs::rename_directory_no_replace(parent, staging_name, final_name) {
+    match app_icon_windows_fs::rename_directory_no_replace(
+        parent,
+        staging_name,
+        final_name,
+        expected_identity,
+    ) {
         Ok(()) => Ok(()),
         Err(app_icon_windows_fs::RenameError::AlreadyExists) => Err(EngineError::OutputExists {
             path: output_directory.clone(),
@@ -411,10 +548,111 @@ fn publish_no_replace(
     _parent: &Dir,
     _staging_name: &str,
     _final_name: &str,
+    _expected_identity: DirectoryIdentity,
     output_directory: &RelativePath,
 ) -> Result<(), EngineError> {
     Err(EngineError::AtomicPublishUnsupported {
         path: output_directory.clone(),
         reason: "no audited atomic no-replace primitive is available for this target".to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io};
+
+    use cap_std::{ambient_authority, fs::Dir};
+    use tempfile::tempdir;
+
+    use super::{directory_identity, preserve_staging, publish_no_replace, staging_relative_path};
+    use crate::{EngineError, PublicationState, RetryAdvice};
+    use app_icon_domain::RelativePath;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn validation_failure() -> Result<(), EngineError> {
+        Err(EngineError::ArtifactValidation {
+            path: RelativePath::new("artifact.png")?,
+            reason: "injected validation failure".to_owned(),
+        })
+    }
+
+    #[test]
+    fn failed_generation_preserves_staging_and_typed_primary_context() -> TestResult {
+        let temporary = tempdir()?;
+        let staging = temporary.path().join("staging");
+        fs::create_dir(&staging)?;
+        fs::write(staging.join("sentinel"), b"preserved")?;
+        let output = RelativePath::new("published")?;
+        let staging_path = RelativePath::new("staging")?;
+        let primary = validation_failure()
+            .err()
+            .ok_or_else(|| io::Error::other("test failure fixture unexpectedly succeeded"))?;
+
+        let error = preserve_staging(&staging_path, &output, primary)
+            .err()
+            .ok_or_else(|| io::Error::other("preservation unexpectedly reported success"))?;
+
+        assert_eq!(error.code(), "ARTIFACT_VALIDATION_FAILED");
+        assert_eq!(error.primary_code(), Some("ARTIFACT_VALIDATION_FAILED"));
+        assert_eq!(
+            error.publication_state(),
+            Some(PublicationState::NotPublished)
+        );
+        assert_eq!(error.retry_advice(), Some(RetryAdvice::MayRetry));
+        assert_eq!(
+            error.staging_relative_path().map(ToString::to_string),
+            Some("staging".to_owned())
+        );
+        assert_eq!(fs::read(staging.join("sentinel"))?, b"preserved");
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "redox",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos",
+        windows
+    ))]
+    fn publication_rejects_a_replaced_staging_identity() -> TestResult {
+        let temporary = tempdir()?;
+        let staging = temporary.path().join("staging");
+        fs::create_dir(&staging)?;
+        let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
+        let identity = directory_identity(&parent, "staging")?;
+        fs::remove_dir(&staging)?;
+        fs::create_dir(&staging)?;
+        fs::write(staging.join("replacement"), b"not validated")?;
+        let output = RelativePath::new("published")?;
+
+        let error = publish_no_replace(&parent, "staging", "published", identity, &output)
+            .err()
+            .ok_or_else(|| io::Error::other("replacement staging was unexpectedly published"))?;
+
+        assert_eq!(error.code(), "ATOMIC_PUBLISH_FAILED");
+        assert!(staging.join("replacement").is_file());
+        assert!(!temporary.path().join("published").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn staging_path_is_a_sibling_of_the_final_component() -> TestResult {
+        let nested = RelativePath::new("build/icons")?;
+        assert_eq!(
+            staging_relative_path(&nested, ".app-icon-toolkit-staging-1-2-3")?.as_str(),
+            "build/.app-icon-toolkit-staging-1-2-3"
+        );
+        let top_level = RelativePath::new("icons")?;
+        assert_eq!(
+            staging_relative_path(&top_level, ".app-icon-toolkit-staging-1-2-3")?.as_str(),
+            ".app-icon-toolkit-staging-1-2-3"
+        );
+        Ok(())
+    }
 }

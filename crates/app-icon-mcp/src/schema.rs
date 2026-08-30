@@ -5,6 +5,7 @@ use app_icon_domain::{
     DisplayName, ExecutableName, IconJob, IconPlan, IconSources, PlatformProfile, ProfilePlan,
     RelativePath, SourceInspection, TargetSpec,
 };
+use app_icon_engine::{EngineError, PublicationState, RetryAdvice};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +60,8 @@ enum TargetRequest {
         /// ICO filename stem without the extension.
         file_stem: String,
     },
+    /// Generate the fixed Windows MSIX application icon asset matrix.
+    WindowsMsixAssets,
     /// Generate a freedesktop hicolor tree and desktop entry.
     LinuxXdg {
         /// Reverse-domain application identifier.
@@ -135,6 +138,7 @@ impl TargetRequest {
                 })?;
                 Ok(TargetSpec::WindowsIco { file_stem })
             }
+            Self::WindowsMsixAssets => Ok(TargetSpec::WindowsMsixAssets),
             Self::LinuxXdg {
                 application_id,
                 display_name,
@@ -255,6 +259,7 @@ enum ProfileName {
     MacOsAppIconSet,
     AndroidAdaptive,
     WindowsIco,
+    WindowsMsixAssets,
     LinuxXdg,
 }
 
@@ -264,6 +269,7 @@ impl From<PlatformProfile> for ProfileName {
             PlatformProfile::MacOsAppIconSet => Self::MacOsAppIconSet,
             PlatformProfile::AndroidAdaptive => Self::AndroidAdaptive,
             PlatformProfile::WindowsIco => Self::WindowsIco,
+            PlatformProfile::WindowsMsixAssets => Self::WindowsMsixAssets,
             PlatformProfile::LinuxXdg => Self::LinuxXdg,
         }
     }
@@ -336,6 +342,54 @@ pub(crate) struct ToolFailure {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     relative_path: Option<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    publication: Option<Box<PublicationFailureContext>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct PublicationFailureContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publication_state: Option<PublicationStateName>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_advice: Option<RetryAdviceName>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staging_relative_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_code: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum PublicationStateName {
+    NotPublished,
+    Indeterminate,
+}
+
+impl From<PublicationState> for PublicationStateName {
+    fn from(state: PublicationState) -> Self {
+        match state {
+            PublicationState::NotPublished => Self::NotPublished,
+            PublicationState::Indeterminate => Self::Indeterminate,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum RetryAdviceName {
+    MayRetry,
+    DoNotRetry,
+    ReconcileFirst,
+}
+
+impl From<RetryAdvice> for RetryAdviceName {
+    fn from(advice: RetryAdvice) -> Self {
+        match advice {
+            RetryAdvice::MayRetry => Self::MayRetry,
+            RetryAdvice::DoNotRetry => Self::DoNotRetry,
+            RetryAdvice::ReconcileFirst => Self::ReconcileFirst,
+        }
+    }
 }
 
 impl ToolFailure {
@@ -344,6 +398,7 @@ impl ToolFailure {
             code: "INVALID_REQUEST".to_owned(),
             message: format!("invalid `{field}`: {}", message.into()),
             relative_path: None,
+            publication: None,
         }
     }
 
@@ -352,6 +407,7 @@ impl ToolFailure {
             code: "BUSY".to_owned(),
             message: format!("the server is at its concurrent {operation} limit; retry later"),
             relative_path: None,
+            publication: None,
         }
     }
 
@@ -360,18 +416,148 @@ impl ToolFailure {
             code: "INTERNAL".to_owned(),
             message: message.into(),
             relative_path: None,
+            publication: None,
         }
     }
 
-    pub(crate) fn engine(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        relative_path: Option<&RelativePath>,
-    ) -> Self {
+    pub(crate) fn engine(error: &EngineError) -> Self {
         Self {
-            code: code.into(),
-            message: message.into(),
-            relative_path: relative_path.map(ToString::to_string),
+            code: error.code().to_owned(),
+            message: error.message(),
+            relative_path: error.relative_path().map(ToString::to_string),
+            publication: PublicationFailureContext::from_error(error).map(Box::new),
         }
+    }
+}
+
+impl PublicationFailureContext {
+    fn from_error(error: &EngineError) -> Option<Self> {
+        let context = Self {
+            publication_state: error.publication_state().map(Into::into),
+            retry_advice: error.retry_advice().map(Into::into),
+            staging_relative_path: error.staging_relative_path().map(ToString::to_string),
+            primary_code: error.primary_code().map(str::to_owned),
+        };
+        if context.publication_state.is_none()
+            && context.retry_advice.is_none()
+            && context.staging_relative_path.is_none()
+            && context.primary_code.is_none()
+        {
+            None
+        } else {
+            Some(context)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use app_icon_domain::RelativePath;
+    use app_icon_engine::EngineError;
+
+    use super::ToolFailure;
+
+    #[test]
+    fn indeterminate_publication_failure_requires_reconciliation_before_retry() {
+        let output = match RelativePath::new("generated") {
+            Ok(path) => path,
+            Err(error) => panic!("test output path is invalid: {error}"),
+        };
+        let staging = match RelativePath::new(".app-icon-toolkit-staging-1-2-3") {
+            Ok(path) => path,
+            Err(error) => panic!("test staging path is invalid: {error}"),
+        };
+        let error = EngineError::PublishOutcomeIndeterminate {
+            path: output,
+            staging_path: staging,
+            native_result: "injected I/O error".to_owned(),
+            primary_code: Some("ATOMIC_PUBLISH_FAILED"),
+            reconciliation_reason: "both names were unobservable".to_owned(),
+        };
+
+        let value = match serde_json::to_value(ToolFailure::engine(&error)) {
+            Ok(value) => value,
+            Err(error) => panic!("tool failure did not serialize: {error}"),
+        };
+
+        assert_eq!(
+            value.get("code").and_then(serde_json::Value::as_str),
+            Some("ATOMIC_PUBLISH_INDETERMINATE")
+        );
+        assert_eq!(
+            value
+                .get("publication_state")
+                .and_then(serde_json::Value::as_str),
+            Some("indeterminate")
+        );
+        assert_eq!(
+            value
+                .get("retry_advice")
+                .and_then(serde_json::Value::as_str),
+            Some("reconcile_first")
+        );
+        assert_eq!(
+            value
+                .get("staging_relative_path")
+                .and_then(serde_json::Value::as_str),
+            Some(".app-icon-toolkit-staging-1-2-3")
+        );
+        assert_eq!(
+            value
+                .get("primary_code")
+                .and_then(serde_json::Value::as_str),
+            Some("ATOMIC_PUBLISH_FAILED")
+        );
+    }
+
+    #[test]
+    fn preserved_collision_retains_primary_code_and_forbids_blind_retry() {
+        let output = match RelativePath::new("generated") {
+            Ok(path) => path,
+            Err(error) => panic!("test output path is invalid: {error}"),
+        };
+        let staging = match RelativePath::new(".app-icon-toolkit-staging-1-2-3") {
+            Ok(path) => path,
+            Err(error) => panic!("test staging path is invalid: {error}"),
+        };
+        let error = EngineError::StagingPreserved {
+            path: output.clone(),
+            staging_path: staging,
+            primary: Box::new(EngineError::OutputExists { path: output }),
+        };
+
+        let value = match serde_json::to_value(ToolFailure::engine(&error)) {
+            Ok(value) => value,
+            Err(error) => panic!("tool failure did not serialize: {error}"),
+        };
+
+        assert_eq!(
+            value.get("code").and_then(serde_json::Value::as_str),
+            Some("OUTPUT_EXISTS")
+        );
+        assert_eq!(
+            value
+                .get("publication_state")
+                .and_then(serde_json::Value::as_str),
+            Some("not_published")
+        );
+        assert_eq!(
+            value
+                .get("retry_advice")
+                .and_then(serde_json::Value::as_str),
+            Some("do_not_retry")
+        );
+        assert_eq!(
+            value
+                .get("staging_relative_path")
+                .and_then(serde_json::Value::as_str),
+            Some(".app-icon-toolkit-staging-1-2-3")
+        );
+        assert_eq!(
+            value
+                .get("primary_code")
+                .and_then(serde_json::Value::as_str),
+            Some("OUTPUT_EXISTS")
+        );
     }
 }

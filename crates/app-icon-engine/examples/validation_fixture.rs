@@ -10,7 +10,7 @@ use app_icon_engine::IconService;
 use image::{ImageBuffer, Rgba};
 
 const SOURCE_EDGE: u32 = 1_024;
-const EXPECTED_ARTIFACTS: usize = 44;
+const EXPECTED_ARTIFACTS: usize = 101;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut arguments = env::args_os();
@@ -87,6 +87,7 @@ fn validation_job() -> Result<IconJob, Box<dyn Error + Send + Sync>> {
         TargetSpec::WindowsIco {
             file_stem: ArtifactName::new("icon-probe")?,
         },
+        TargetSpec::WindowsMsixAssets,
         TargetSpec::LinuxXdg {
             application_id: ApplicationId::new("com.example.IconProbe")?,
             display_name: DisplayName::new("Icon Probe")?,
