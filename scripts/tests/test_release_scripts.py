@@ -46,19 +46,215 @@ build_release_binary = load_script(
 install_release_toolchain = load_script(
     "install_release_toolchain", "install-release-toolchain.py"
 )
+check_release_version = load_script(
+    "check_release_version", "check-release-version.py"
+)
 smoke_installed_plugin = load_script(
     "smoke_installed_plugin", "smoke-installed-plugin.py"
 )
 
 
+class ReleaseVersionTests(unittest.TestCase):
+    @staticmethod
+    def cargo_metadata(
+        versions: tuple[str, ...] = ("0.2.1", "0.2.1"),
+    ) -> subprocess.CompletedProcess[str]:
+        packages = [
+            {"id": f"package-{index}", "version": version}
+            for index, version in enumerate(versions)
+        ]
+        metadata = {
+            "workspace_members": [package["id"] for package in packages],
+            "packages": packages,
+        }
+        return subprocess.CompletedProcess(
+            args=["cargo", "metadata"],
+            returncode=0,
+            stdout=json.dumps(metadata),
+            stderr="",
+        )
+
+    def test_workspace_version_comes_from_all_cargo_members(self) -> None:
+        with mock.patch.object(
+            check_release_version.subprocess,
+            "run",
+            return_value=self.cargo_metadata(),
+        ) as run:
+            version = check_release_version.load_workspace_version(Path("/workspace"))
+
+        self.assertEqual(version, "0.2.1")
+        command = run.call_args.args[0]
+        self.assertEqual(command[0:2], ["cargo", "metadata"])
+        self.assertIn("--locked", command)
+        self.assertIn("--no-deps", command)
+        self.assertEqual(
+            run.call_args.kwargs["timeout"],
+            check_release_version.CARGO_METADATA_TIMEOUT_SECONDS,
+        )
+
+    def test_workspace_version_rejects_drift_and_cargo_failure(self) -> None:
+        cases = [
+            (self.cargo_metadata(("0.2.0", "0.2.1")), "versions disagree"),
+            (
+                subprocess.CompletedProcess(
+                    args=["cargo", "metadata"],
+                    returncode=101,
+                    stdout="",
+                    stderr="manifest is invalid",
+                ),
+                "Cargo metadata failed.*manifest is invalid",
+            ),
+            (self.cargo_metadata(()), "no workspace members"),
+        ]
+        for completed, message in cases:
+            with self.subTest(message=message):
+                with mock.patch.object(
+                    check_release_version.subprocess,
+                    "run",
+                    return_value=completed,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        check_release_version.load_workspace_version(Path("/workspace"))
+
+        with mock.patch.object(
+            check_release_version.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["cargo", "metadata"], 60),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exceeded 60 seconds"):
+                check_release_version.load_workspace_version(Path("/workspace"))
+
+    def test_workspace_version_rejects_malformed_cargo_metadata(self) -> None:
+        cases = [
+            (
+                subprocess.CompletedProcess(
+                    args=["cargo", "metadata"],
+                    returncode=0,
+                    stdout="{",
+                    stderr="",
+                ),
+                "invalid JSON",
+            ),
+            (
+                subprocess.CompletedProcess(
+                    args=["cargo", "metadata"],
+                    returncode=0,
+                    stdout=json.dumps(
+                        {"workspace_members": ["missing"], "packages": []}
+                    ),
+                    stderr="",
+                ),
+                "omitted workspace members.*missing",
+            ),
+            (
+                subprocess.CompletedProcess(
+                    args=["cargo", "metadata"],
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "workspace_members": ["duplicate"],
+                            "packages": [
+                                {"id": "duplicate", "version": "0.2.1"},
+                                {"id": "duplicate", "version": "0.2.1"},
+                            ],
+                        }
+                    ),
+                    stderr="",
+                ),
+                "repeated package id.*duplicate",
+            ),
+        ]
+        for completed, message in cases:
+            with self.subTest(message=message):
+                with mock.patch.object(
+                    check_release_version.subprocess,
+                    "run",
+                    return_value=completed,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        check_release_version.load_workspace_version(Path("/workspace"))
+
+        with mock.patch.object(
+            check_release_version.subprocess,
+            "run",
+            side_effect=OSError("cargo executable is unavailable"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed to run Cargo metadata"):
+                check_release_version.load_workspace_version(Path("/workspace"))
+
+    def test_release_version_checks_plugin_and_changelog_surfaces(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-version-test-") as temporary:
+            root = Path(temporary)
+            (root / ".codex-plugin").mkdir()
+            (root / ".codex-plugin" / "plugin.json").write_text(
+                json.dumps({"version": "0.2.1+installation-test"}),
+                encoding="utf-8",
+            )
+            (root / "CHANGELOG.md").write_text(
+                "## 0.2.1 - 2026-08-30\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                check_release_version,
+                "load_workspace_version",
+                return_value="0.2.1",
+            ):
+                check_release_version.verify_release_version("v0.2.1", root)
+
+                (root / ".codex-plugin" / "plugin.json").write_text(
+                    json.dumps({"version": "0.2.0"}),
+                    encoding="utf-8",
+                )
+                (root / "CHANGELOG.md").write_text(
+                    "## 0.2.0 - 2026-08-30\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "Cargo workspace version is 0.2.1.*"
+                    "plugin manifest version is 0.2.0.*"
+                    "changelog must contain exactly one dated release heading",
+                ):
+                    check_release_version.verify_release_version("v0.3.0", root)
+
+                (root / ".codex-plugin" / "plugin.json").write_text(
+                    json.dumps({"version": "0.2.1"}),
+                    encoding="utf-8",
+                )
+                (root / "CHANGELOG.md").write_text(
+                    "## 0.2.1 - 2026-08-30\n## 0.2.1 - 2026-08-31\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(SystemExit, "exactly one"):
+                    check_release_version.verify_release_version("v0.2.1", root)
+
+                (root / "CHANGELOG.md").write_text(
+                    "## 0.2.1 - 2026-99-99\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(SystemExit, "invalid date"):
+                    check_release_version.verify_release_version("v0.2.1", root)
+
+
 class ReleaseTargetContractTests(unittest.TestCase):
     def test_contract_is_the_complete_release_inventory(self) -> None:
         contract = release_targets.load_contract()
+        expected_ids = [
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "universal2-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
+        ]
 
         self.assertEqual(contract.release_toolchain, "1.97.1")
+        self.assertEqual([target.id for target in contract.targets], expected_ids)
         self.assertEqual(
             [entry["id"] for entry in (target.matrix_entry() for target in contract.targets)],
-            [target.id for target in contract.targets],
+            expected_ids,
         )
         self.assertEqual(len({target.id for target in contract.targets}), len(contract.targets))
         universal = contract.target("universal2-apple-darwin")
@@ -691,15 +887,32 @@ class McpProcessLifecycleTests(unittest.TestCase):
         process = self.make_process("WARNING shutdown diagnostic")
         primary = RuntimeError("primary protocol failure")
 
-        with self.assertRaises(ExceptionGroup) as captured:
+        with self.assertRaises(smoke_installed_plugin.McpProcessFailure) as captured:
             with process:
                 raise primary
 
-        self.assertIs(captured.exception.exceptions[0], primary)
-        self.assertIsInstance(
-            captured.exception.exceptions[1],
-            smoke_installed_plugin.McpProcessFailure,
+        self.assertEqual(
+            [stage for stage, _error in captured.exception.issues],
+            ["protocol exchange", "shutdown/validate stderr"],
         )
+        self.assertIs(captured.exception.issues[0][1], primary)
+        self.assertRegex(str(captured.exception.issues[1][1]), "error or warning")
+
+    def test_primary_and_unclassified_shutdown_failure_are_both_preserved(self) -> None:
+        process = self.make_process()
+        process.close = mock.Mock(side_effect=OSError("injected close failure"))
+        primary = RuntimeError("primary protocol failure")
+
+        with self.assertRaises(smoke_installed_plugin.McpProcessFailure) as captured:
+            with process:
+                raise primary
+
+        self.assertEqual(
+            [stage for stage, _error in captured.exception.issues],
+            ["protocol exchange", "shutdown"],
+        )
+        self.assertIs(captured.exception.issues[0][1], primary)
+        self.assertRegex(str(captured.exception.issues[1][1]), "close failure")
 
     def test_large_stderr_is_drained_without_unbounded_capture(self) -> None:
         process = object.__new__(smoke_installed_plugin.McpProcess)
