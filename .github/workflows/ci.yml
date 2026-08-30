@@ -49,6 +49,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust components
         run: rustup component add clippy rustfmt
+      - name: Test release scripts on Unix
+        if: runner.os != 'Windows'
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Test release scripts on Windows
+        if: runner.os == 'Windows'
+        run: python -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy

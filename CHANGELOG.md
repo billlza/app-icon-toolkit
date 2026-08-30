@@ -3,6 +3,16 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.1.1 - 2026-08-30
+
+### Fixed
+
+- Resolve packaged MCP commands from the declared plugin working directory so
+  Windows release archives are smoke-tested against their bundled `.exe`
+  instead of the release runner's ambient checkout.
+- Derive the installed executable name from the requested release target and
+  reject unsupported target triples explicitly.
+
 ## 0.1.0 - 2026-08-30
 
 ### Added

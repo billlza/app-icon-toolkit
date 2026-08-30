@@ -28,7 +28,21 @@ STATIC_PATHS = (
 )
 
 
-def copy_package(plugin_root: Path, package_root: Path, binary: Path) -> Path:
+def installed_binary_name(target: str) -> str:
+    if target == "x86_64-pc-windows-msvc":
+        return "app-icon-toolkit-mcp.exe"
+    if target in {
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+    }:
+        return "app-icon-toolkit-mcp"
+    raise RuntimeError(f"unsupported release target: {target}")
+
+
+def copy_package(
+    plugin_root: Path, package_root: Path, binary: Path, target: str
+) -> Path:
     for relative in STATIC_PATHS:
         source = plugin_root / relative
         if not source.is_file():
@@ -37,7 +51,7 @@ def copy_package(plugin_root: Path, package_root: Path, binary: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
 
-    installed_name = "app-icon-toolkit-mcp.exe" if os.name == "nt" else "app-icon-toolkit-mcp"
+    installed_name = installed_binary_name(target)
     installed_binary = package_root / "bin" / installed_name
     installed_binary.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(binary, installed_binary)
@@ -105,7 +119,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="app-icon-toolkit-package-") as temporary:
         package_root = Path(temporary) / "app-icon-toolkit"
-        copy_package(plugin_root, package_root, binary)
+        copy_package(plugin_root, package_root, binary, arguments.target)
         subprocess.run(
             [
                 os.environ.get("PYTHON", "python3"),

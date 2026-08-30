@@ -1,6 +1,6 @@
 {
   "name": "app-icon-toolkit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Plan and generate validated application icon bundles for macOS, Android, Windows, and Linux.",
   "author": {
     "name": "App Icon Toolkit maintainers"

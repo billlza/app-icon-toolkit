@@ -80,6 +80,8 @@ jobs:
         run: rustup target add ${{ matrix.target }}
       - name: Install Rust quality components
         run: rustup component add clippy rustfmt
+      - name: Test release scripts
+        run: ${{ matrix.python }} -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy

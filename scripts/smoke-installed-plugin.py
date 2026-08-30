@@ -19,6 +19,79 @@ PROTOCOL_VERSION = "2025-11-25"
 EXPECTED_ARTIFACTS = 44
 
 
+def _require_string(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"{field} must be a non-empty string")
+    return value
+
+
+def _require_inside_plugin(path: Path, plugin_root: Path, field: str) -> Path:
+    try:
+        path.relative_to(plugin_root)
+    except ValueError as error:
+        raise RuntimeError(f"{field} escapes the packaged plugin root: {path}") from error
+    return path
+
+
+def resolve_packaged_server_process(
+    plugin_root: Path, server: dict[str, object]
+) -> tuple[list[str], Path]:
+    """Resolve the bundled command exactly as a plugin-root-relative process."""
+
+    plugin_root = plugin_root.resolve(strict=True)
+    cwd_value = _require_string(server.get("cwd", "."), "MCP server cwd")
+    configured_cwd = Path(cwd_value)
+    if configured_cwd.is_absolute():
+        raise RuntimeError("packaged MCP server cwd must be relative to the plugin root")
+    working_directory = _require_inside_plugin(
+        (plugin_root / configured_cwd).resolve(strict=True),
+        plugin_root,
+        "MCP server cwd",
+    )
+    if not working_directory.is_dir():
+        raise RuntimeError(f"MCP server cwd is not a directory: {working_directory}")
+
+    command_value = _require_string(server.get("command"), "MCP server command")
+    configured_command = Path(command_value)
+    if configured_command.is_absolute():
+        raise RuntimeError("packaged MCP server command must be relative to its cwd")
+    unresolved_command = _require_inside_plugin(
+        (working_directory / configured_command).resolve(strict=False),
+        plugin_root,
+        "MCP server command",
+    )
+
+    # Codex resolves this extensionless path against the configured cwd and uses
+    # PATHEXT on Windows. Materialize the package's known native suffix before
+    # Popen so no parent-process cwd or PATH entry can shadow the bundled binary.
+    executable_candidate = unresolved_command
+    if os.name == "nt" and not executable_candidate.suffix:
+        executable_candidate = executable_candidate.with_name(
+            f"{executable_candidate.name}.exe"
+        )
+    try:
+        executable = _require_inside_plugin(
+            executable_candidate.resolve(strict=True),
+            plugin_root,
+            "resolved MCP server command",
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"packaged MCP command does not exist: {executable_candidate}"
+        ) from error
+    if not executable.is_file():
+        raise RuntimeError(f"packaged MCP command is not a file: {executable}")
+    if os.name != "nt" and not os.access(executable, os.X_OK):
+        raise RuntimeError(f"packaged MCP command is not executable: {executable}")
+
+    args_value = server.get("args", [])
+    if not isinstance(args_value, list) or not all(
+        isinstance(argument, str) for argument in args_value
+    ):
+        raise RuntimeError("MCP server args must be an array of strings")
+    return [str(executable), *args_value], working_directory
+
+
 def png_chunk(kind: bytes, data: bytes) -> bytes:
     payload = kind + data
     return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload))
@@ -40,17 +113,29 @@ def write_opaque_png(path: Path, edge: int = 1024) -> None:
 class McpProcess:
     def __init__(self, plugin_root: Path) -> None:
         config = json.loads((plugin_root / ".mcp.json").read_text(encoding="utf-8"))
-        server = config["mcpServers"]["app-icon-toolkit"]
-        command = [server["command"], *server.get("args", [])]
-        self._process = subprocess.Popen(
-            command,
-            cwd=plugin_root / server.get("cwd", "."),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-        )
+        if not isinstance(config, dict):
+            raise RuntimeError(".mcp.json must contain an object")
+        servers = config.get("mcpServers")
+        if not isinstance(servers, dict):
+            raise RuntimeError(".mcp.json must contain an mcpServers object")
+        server = servers.get("app-icon-toolkit")
+        if not isinstance(server, dict):
+            raise RuntimeError(".mcp.json omitted the app-icon-toolkit server")
+        command, working_directory = resolve_packaged_server_process(plugin_root, server)
+        try:
+            self._process = subprocess.Popen(
+                command,
+                cwd=working_directory,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+        except OSError as error:
+            raise RuntimeError(
+                f"failed to start packaged MCP command {command[0]}: {error}"
+            ) from error
         if self._process.stdin is None or self._process.stdout is None:
             raise RuntimeError("MCP process did not expose stdio")
         self._messages: queue.Queue[dict[str, object] | BaseException | None] = queue.Queue()
