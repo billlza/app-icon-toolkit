@@ -104,6 +104,42 @@ async fn duplex_client_lists_strict_schemas_and_receives_structured_errors() -> 
     assert_annotations(generate, false, false, false, false)?;
     assert_annotations(plan, true, false, true, false)?;
 
+    let workspace = tempdir()?;
+    create_test_sources(workspace.path())?;
+    let msix_arguments = object(json!({
+        "workspace_root": workspace.path().canonicalize()?,
+        "output_directory": "generated",
+        "sources": { "flattened": "sources/flattened.png" },
+        "targets": [{ "profile": "windows_msix_assets" }]
+    }))?;
+    let msix_plan = client
+        .call_tool(CallToolRequestParams::new("plan_icon_set").with_arguments(msix_arguments))
+        .await?;
+    assert_ne!(msix_plan.is_error, Some(true));
+    let structured_msix_plan = msix_plan
+        .structured_content
+        .as_ref()
+        .ok_or_else(|| io::Error::other("MSIX plan omitted structured JSON content"))?;
+    assert_eq!(
+        structured_msix_plan
+            .pointer("/profiles/0/profile")
+            .and_then(Value::as_str),
+        Some("windows_msix_assets")
+    );
+    let msix_artifacts = structured_msix_plan
+        .pointer("/profiles/0/artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("MSIX plan omitted its artifact matrix"))?;
+    assert_eq!(msix_artifacts.len(), 57);
+    assert_eq!(
+        msix_artifacts[0].get("path").and_then(Value::as_str),
+        Some("windows/msix/Assets/AppList.targetsize-16.png")
+    );
+    assert_eq!(
+        msix_artifacts[56].get("path").and_then(Value::as_str),
+        Some("windows/msix/Assets/StoreLogo.scale-400.png")
+    );
+
     let arguments = object(json!({
         "workspace_root": "relative/workspace",
         "output_directory": "generated",
@@ -316,6 +352,7 @@ fn assert_request_schema(tool: &Tool) -> TestResult {
         "mac_os_app_icon_set",
         "android_adaptive",
         "windows_ico",
+        "windows_msix_assets",
         "linux_xdg",
     ] {
         assert!(

@@ -122,6 +122,15 @@ pub(crate) fn all_target_job(output_directory: &str) -> TestResult<IconJob> {
     target_job(output_directory, true)
 }
 
+pub(crate) fn windows_msix_job(output_directory: &str) -> TestResult<IconJob> {
+    let sources = IconSources::new(RelativePath::new("sources/flattened.png")?, None);
+    Ok(IconJob::new(
+        RelativePath::new(output_directory)?,
+        sources,
+        vec![TargetSpec::WindowsMsixAssets],
+    )?)
+}
+
 fn target_job(output_directory: &str, include_monochrome: bool) -> TestResult<IconJob> {
     let adaptive = AdaptiveSources::new(
         RelativePath::new("sources/foreground.png")?,

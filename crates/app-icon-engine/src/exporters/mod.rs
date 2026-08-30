@@ -2,6 +2,7 @@ mod android;
 mod linux;
 mod macos;
 mod windows;
+mod windows_msix;
 
 pub(crate) use windows::FRAME_SIZES as WINDOWS_FRAME_SIZES;
 
@@ -53,6 +54,7 @@ fn build_plan_for_sources(
                 android::plan(resource_name, job.sources().adaptive())?
             }
             app_icon_domain::TargetSpec::WindowsIco { file_stem } => windows::plan(file_stem)?,
+            app_icon_domain::TargetSpec::WindowsMsixAssets => windows_msix::plan()?,
             app_icon_domain::TargetSpec::LinuxXdg {
                 application_id,
                 display_name: _,
@@ -93,6 +95,9 @@ pub(crate) fn render_job(
             )?,
             app_icon_domain::TargetSpec::WindowsIco { file_stem } => {
                 windows::render(file_stem, flattened, &mut cache)?
+            }
+            app_icon_domain::TargetSpec::WindowsMsixAssets => {
+                windows_msix::render(flattened, &mut cache)?
             }
             app_icon_domain::TargetSpec::LinuxXdg {
                 application_id,

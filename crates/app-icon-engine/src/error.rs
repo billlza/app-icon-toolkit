@@ -3,6 +3,26 @@ use std::{io, path::PathBuf};
 use app_icon_domain::{DomainError, RelativePath};
 use thiserror::Error;
 
+/// Observed namespace result for an icon-set publication attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationState {
+    /// Reconciliation proved that this invocation did not publish its staging directory.
+    NotPublished,
+    /// The filesystem state could not prove either outcome.
+    Indeterminate,
+}
+
+/// Safe caller action after a publication-related failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryAdvice {
+    /// A new attempt is safe because the previous attempt was proven not to have published.
+    MayRetry,
+    /// A new attempt would be incorrect because publication is already known to have occurred.
+    DoNotRetry,
+    /// Inspect the named output and staging paths before deciding whether another attempt is safe.
+    ReconcileFirst,
+}
+
 /// Failures raised while inspecting, planning, rendering, or publishing icons.
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -114,6 +134,20 @@ pub enum EngineError {
         source: io::Error,
     },
 
+    /// A live handle pin could not be acquired for the newly created staging
+    /// directory, so it is preserved instead of being deleted by name.
+    #[error(
+        "failed to pin staging directory `{staging_path}` for `{path}`; it was preserved: {source}"
+    )]
+    StagingIdentity {
+        /// Intended final output directory.
+        path: RelativePath,
+        /// Workspace-relative staging directory that may require inspection.
+        staging_path: RelativePath,
+        /// Live directory-handle acquisition failure.
+        source: io::Error,
+    },
+
     /// An artifact directory could not be created inside staging.
     #[error("failed to create artifact parent for `{path}`: {source}")]
     ArtifactParent {
@@ -195,22 +229,43 @@ pub enum EngineError {
         source: io::Error,
     },
 
-    /// Cleanup failed after another generation failure.
-    #[error("generation failed ({primary}); cleanup of staging for `{path}` also failed: {source}")]
-    StagingCleanup {
+    /// The native rename result and subsequent identity observations could not
+    /// prove whether the staging directory was published.
+    #[error(
+        "publication outcome for `{path}` is indeterminate ({native_result}); preserve `{staging_path}` if present and reconcile before retrying: {reconciliation_reason}"
+    )]
+    PublishOutcomeIndeterminate {
         /// Intended final output directory.
         path: RelativePath,
-        /// Primary failure retained for diagnostics.
-        primary: String,
-        /// Cleanup failure.
-        source: io::Error,
+        /// Workspace-relative sibling staging path that may still exist.
+        staging_path: RelativePath,
+        /// Native success or error result retained for diagnosis.
+        native_result: String,
+        /// Stable code of the underlying publication error, when there was one.
+        primary_code: Option<&'static str>,
+        /// Exact observations that prevented a definitive result.
+        reconciliation_reason: String,
+    },
+
+    /// Generation failed before publication was proven, so staging was
+    /// preserved instead of being removed through a raceable name.
+    #[error(
+        "generation failed ({primary}); staging directory `{staging_path}` was preserved for safe inspection"
+    )]
+    StagingPreserved {
+        /// Intended final output directory.
+        path: RelativePath,
+        /// Workspace-relative staging path retained for inspection or explicit cleanup.
+        staging_path: RelativePath,
+        /// Typed primary failure retained for its stable code and context.
+        primary: Box<EngineError>,
     },
 }
 
 impl EngineError {
     /// Returns a stable machine-readable error code for MCP mapping.
     #[must_use]
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::Domain(_) => "DOMAIN_ERROR",
             Self::WorkspaceRoot { .. } => "WORKSPACE_ROOT_UNAVAILABLE",
@@ -225,6 +280,7 @@ impl EngineError {
             Self::OutputParent { .. } => "OUTPUT_PARENT_UNAVAILABLE",
             Self::OutputExists { .. } => "OUTPUT_EXISTS",
             Self::StagingCreate { .. } => "STAGING_CREATE_FAILED",
+            Self::StagingIdentity { .. } => "STAGING_IDENTITY_FAILED",
             Self::ArtifactParent { .. } => "ARTIFACT_PARENT_FAILED",
             Self::ArtifactCreate { .. } => "ARTIFACT_CREATE_FAILED",
             Self::ArtifactWrite { .. } => "ARTIFACT_WRITE_FAILED",
@@ -234,7 +290,8 @@ impl EngineError {
             Self::ArtifactValidation { .. } => "ARTIFACT_VALIDATION_FAILED",
             Self::AtomicPublishUnsupported { .. } => "ATOMIC_PUBLISH_UNSUPPORTED",
             Self::Publish { .. } => "ATOMIC_PUBLISH_FAILED",
-            Self::StagingCleanup { .. } => "STAGING_CLEANUP_FAILED",
+            Self::PublishOutcomeIndeterminate { .. } => "ATOMIC_PUBLISH_INDETERMINATE",
+            Self::StagingPreserved { primary, .. } => primary.code(),
         }
     }
 
@@ -246,7 +303,7 @@ impl EngineError {
 
     /// Returns the workspace-relative path associated with the failure.
     #[must_use]
-    pub const fn relative_path(&self) -> Option<&RelativePath> {
+    pub fn relative_path(&self) -> Option<&RelativePath> {
         match self {
             Self::Domain(_) | Self::WorkspaceRoot { .. } => None,
             Self::SourceRead { path, .. }
@@ -260,6 +317,7 @@ impl EngineError {
             | Self::OutputParent { path, .. }
             | Self::OutputExists { path }
             | Self::StagingCreate { path, .. }
+            | Self::StagingIdentity { path, .. }
             | Self::ArtifactParent { path, .. }
             | Self::ArtifactCreate { path, .. }
             | Self::ArtifactWrite { path, .. }
@@ -269,7 +327,59 @@ impl EngineError {
             | Self::ArtifactValidation { path, .. }
             | Self::AtomicPublishUnsupported { path, .. }
             | Self::Publish { path, .. }
-            | Self::StagingCleanup { path, .. } => Some(path),
+            | Self::PublishOutcomeIndeterminate { path, .. } => Some(path),
+            Self::StagingPreserved { path, primary, .. } => primary.relative_path().or(Some(path)),
+        }
+    }
+
+    /// Returns the namespace state when this error carries publication outcome information.
+    #[must_use]
+    pub fn publication_state(&self) -> Option<PublicationState> {
+        match self {
+            Self::OutputExists { .. }
+            | Self::StagingIdentity { .. }
+            | Self::AtomicPublishUnsupported { .. }
+            | Self::Publish { .. }
+            | Self::StagingPreserved { .. } => Some(PublicationState::NotPublished),
+            Self::PublishOutcomeIndeterminate { .. } => Some(PublicationState::Indeterminate),
+            _ => None,
+        }
+    }
+
+    /// Returns the action a caller may take without risking a duplicate publication.
+    #[must_use]
+    pub fn retry_advice(&self) -> Option<RetryAdvice> {
+        match self {
+            Self::StagingIdentity { .. } | Self::Publish { .. } => Some(RetryAdvice::MayRetry),
+            Self::OutputExists { .. } | Self::AtomicPublishUnsupported { .. } => {
+                Some(RetryAdvice::DoNotRetry)
+            }
+            Self::PublishOutcomeIndeterminate { .. } => Some(RetryAdvice::ReconcileFirst),
+            Self::StagingPreserved { primary, .. } => {
+                primary.retry_advice().or(Some(RetryAdvice::MayRetry))
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the sibling staging path when it is needed for manual reconciliation.
+    #[must_use]
+    pub const fn staging_relative_path(&self) -> Option<&RelativePath> {
+        match self {
+            Self::StagingIdentity { staging_path, .. }
+            | Self::PublishOutcomeIndeterminate { staging_path, .. }
+            | Self::StagingPreserved { staging_path, .. } => Some(staging_path),
+            _ => None,
+        }
+    }
+
+    /// Returns the typed primary error code retained by a wrapper error.
+    #[must_use]
+    pub fn primary_code(&self) -> Option<&'static str> {
+        match self {
+            Self::PublishOutcomeIndeterminate { primary_code, .. } => *primary_code,
+            Self::StagingPreserved { primary, .. } => Some(primary.code()),
+            _ => None,
         }
     }
 }

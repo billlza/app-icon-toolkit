@@ -47,7 +47,7 @@ impl IconMcpServer {
     }
 
     fn engine_failure(error: &EngineError) -> ToolFailure {
-        ToolFailure::engine(error.code(), error.message(), error.relative_path())
+        ToolFailure::engine(error)
     }
 
     fn worker_failure(operation: &'static str, error: &JoinError) -> ToolFailure {

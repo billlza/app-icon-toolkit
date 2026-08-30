@@ -3,6 +3,40 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.2.0 - 2026-08-30
+
+### Added
+
+- Add the `windows_msix_assets` profile with 57 deterministic AppList,
+  medium-tile, and Store-logo PNG resources, plus native MakePri and MakeAppx
+  validation in Windows CI.
+- Add native-tested Windows ARM64, static-musl Linux x86_64 and ARM64, and
+  macOS Universal2 release archives while preserving the existing thin and GNU
+  archive names.
+- Add strict final-binary checks for PE/ELF machine type, Windows dynamic CRT
+  imports, GNU glibc 2.34 ceiling, static-musl linkage, Mach-O slices, and each
+  macOS slice's 13.0 deployment minimum.
+- Add identity-based publication outcome reconciliation and structured MCP
+  fields for publication state, retry advice, staging path, and wrapped primary
+  error code.
+
+### Changed
+
+- Build releases with pinned Rust 1.97.1 from one validated target contract and
+  publish candidates with atomic no-replace semantics.
+- Smoke-test the exact Universal2 archive on both Apple silicon and Intel before
+  publication.
+
+### Fixed
+
+- Preserve staging evidence when a native rename result cannot prove whether
+  publication committed, instead of deleting by name and returning a misleading
+  ordinary failure.
+- Retain typed primary errors and preserve staging on every post-creation
+  failure, avoiding recursive deletion through a raceable directory name.
+- Keep the original staging directory handle live through reconciliation so
+  inode or file-ID reuse cannot make a replacement object appear validated.
+
 ## 0.1.2 - 2026-08-30
 
 ### Fixed

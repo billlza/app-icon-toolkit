@@ -6,7 +6,8 @@ Security fixes are provided for the latest published minor release.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | Yes |
+| 0.2.x | Yes |
+| 0.1.x | No |
 | Older or unreleased snapshots | No |
 
 ## Reporting a vulnerability
@@ -33,10 +34,46 @@ oversized image inputs, destination replacement, partial output publication,
 and unbounded concurrent generation. It does not sandbox the caller-selected
 workspace root or protect against an operating-system administrator.
 
+The transaction keeps the original staging directory open through validation,
+rename, and reconciliation, and compares both names against that live pin after
+every native result. It performs no recursive staging cleanup after generation
+has started. If the namespace cannot prove whether the pinned object became
+final, the tool preserves the evidence and returns
+`ATOMIC_PUBLISH_INDETERMINATE` with `reconcile_first`; it never treats that
+state as success, ordinary failure, or permission to retry automatically.
+
 The publication primitive protects namespace integrity and atomic visibility;
 it is not a cryptographic integrity mechanism and does not promise complete
-power-loss durability. Windows network filesystems that reject handle-relative
-rename fail explicitly rather than using an ambient-path fallback.
+power-loss durability. Files are synchronized, but directory entries,
+controller caches, and remote-server recovery have platform-specific
+durability boundaries. `SIGKILL` before rename can leave a hidden staging
+directory. Automatic PID-based orphan cleanup is intentionally excluded because
+PID reuse and concurrent processes can make ownership ambiguous.
+
+Windows network filesystems that reject handle-relative rename fail explicitly
+rather than using an ambient-path fallback. SMB remains unsupported. A process
+with the same user identity and concurrent write access to the workspace can
+force an indeterminate result or denial of service. Preserving staging on every
+post-creation failure avoids deleting a replacement object through a raceable
+name.
+
+On Unix, the no-replace rename API remains path-based. The engine reopens and
+compares staging with the pinned directory immediately before the syscall, but
+an equally privileged process can replace the source in the remaining window.
+Reconciliation will mark a different final object indeterminate; callers must
+not consume that final directory as trusted output.
+
+An open directory handle does not protect file contents from a process running
+as the same user. Such a process can modify staging after readback validation
+or final after publication without replacing the directory object. Run
+generation in a workspace that excludes equally privileged concurrent writers;
+this project does not add hashes, signatures, or encryption to ordinary local
+icon assets.
+
+Release scripts execute platform SDK validators in CI and development gates,
+including MakePri and MakeAppx for the generated MSIX resource matrix. The MCP
+runtime itself still invokes no subprocess and accepts no package manifest or
+executable from a project.
 
 No network service, authentication secret, telemetry, subprocess invocation,
 or project-provided executable is part of the MCP runtime.

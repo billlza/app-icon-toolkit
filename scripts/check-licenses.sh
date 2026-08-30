@@ -1,5 +1,5 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 plugin_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cargo_about=${CARGO_ABOUT:-cargo-about}
@@ -22,13 +22,5 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-command -v "$cargo_about" >/dev/null 2>&1 || {
-  echo "cargo-about 0.9.2 is required to verify third-party notices" >&2
-  exit 1
-}
-
-cd "$plugin_root"
-"$cargo_about" generate --locked --workspace --all-features \
-  --output-file "$generated_notice" \
-  "$plugin_root/about.hbs"
+CARGO_ABOUT="$cargo_about" "$plugin_root/scripts/generate-licenses.sh" "$generated_notice"
 cmp "$generated_notice" "$plugin_root/THIRD_PARTY_LICENSES.html"

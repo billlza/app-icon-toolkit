@@ -89,6 +89,8 @@ pub enum PlatformProfile {
     AndroidAdaptive,
     /// Multi-frame Windows Win32 ICO.
     WindowsIco,
+    /// Windows MSIX application-list, medium-tile, and Store logo assets.
+    WindowsMsixAssets,
     /// Freedesktop hicolor icon tree and desktop entry.
     LinuxXdg,
 }
@@ -112,6 +114,8 @@ pub enum TargetSpec {
         /// Output filename stem without `.ico`.
         file_stem: ArtifactName,
     },
+    /// Fixed Windows MSIX application icon asset matrix.
+    WindowsMsixAssets,
     /// Freedesktop hicolor tree and desktop entry.
     LinuxXdg {
         /// Reverse-domain desktop/application identifier.
@@ -131,6 +135,7 @@ impl TargetSpec {
             Self::MacOsAppIconSet { .. } => PlatformProfile::MacOsAppIconSet,
             Self::AndroidAdaptive { .. } => PlatformProfile::AndroidAdaptive,
             Self::WindowsIco { .. } => PlatformProfile::WindowsIco,
+            Self::WindowsMsixAssets => PlatformProfile::WindowsMsixAssets,
             Self::LinuxXdg { .. } => PlatformProfile::LinuxXdg,
         }
     }
@@ -371,9 +376,9 @@ fn validate_length(value: &str, maximum: usize) -> Result<(), &'static str> {
 mod tests {
     use super::{
         AdaptiveSources, AndroidResourceName, ApplicationId, ArtifactName, DisplayName,
-        ExecutableName, IconJob, IconSources, TargetSpec,
+        ExecutableName, IconJob, IconSources, PlatformProfile, TargetSpec,
     };
-    use crate::RelativePath;
+    use crate::{DomainError, RelativePath};
 
     fn path(value: &str) -> RelativePath {
         match RelativePath::new(value) {
@@ -431,5 +436,23 @@ mod tests {
             vec![TargetSpec::AndroidAdaptive { resource_name }],
         );
         assert!(job.is_ok());
+    }
+
+    #[test]
+    fn rejects_duplicate_windows_msix_profiles() {
+        let sources = IconSources::new(path("source.png"), None);
+        let error = IconJob::new(
+            path("generated"),
+            sources,
+            vec![TargetSpec::WindowsMsixAssets, TargetSpec::WindowsMsixAssets],
+        )
+        .err();
+
+        assert_eq!(
+            error,
+            Some(DomainError::DuplicateTarget {
+                profile: PlatformProfile::WindowsMsixAssets,
+            })
+        );
     }
 }

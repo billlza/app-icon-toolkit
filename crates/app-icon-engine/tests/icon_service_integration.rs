@@ -5,13 +5,14 @@ mod support;
 use std::fs;
 use std::io;
 
-use app_icon_domain::PlatformProfile;
+use app_icon_domain::{ArtifactKind, PlatformProfile};
 use app_icon_engine::IconService;
+use image::ImageReader;
 use tempfile::tempdir;
 
 use support::{
-    EXPECTED_ARTIFACTS, TestResult, all_target_job, create_sources,
-    write_quadrant_png_with_dimensions,
+    EXPECTED_ARTIFACTS, TestResult, all_target_job, create_sources, snapshot_files,
+    windows_msix_job, write_quadrant_png_with_dimensions,
 };
 
 #[test]
@@ -60,6 +61,77 @@ fn plan_matches_fixed_four_platform_oracle_without_writing() -> TestResult {
         ]
     );
     assert_plan_matches_oracle(&plan);
+    Ok(())
+}
+
+#[test]
+fn windows_msix_profile_generates_the_exact_57_asset_matrix() -> TestResult {
+    let workspace = tempdir()?;
+    create_sources(workspace.path())?;
+    let job = windows_msix_job("generated")?;
+    let service = IconService::new();
+    let expected = expected_windows_msix_matrix();
+
+    let plan = service.plan(workspace.path(), &job)?;
+    assert_eq!(plan.profiles().len(), 1);
+    assert_eq!(
+        plan.profiles()[0].profile(),
+        PlatformProfile::WindowsMsixAssets
+    );
+    let mut actual = plan
+        .artifacts()
+        .map(|artifact| {
+            (
+                artifact.path().to_string(),
+                artifact.kind(),
+                artifact.pixel_width(),
+                artifact.pixel_height(),
+            )
+        })
+        .collect::<Vec<_>>();
+    actual.sort_by(|left, right| left.0.cmp(&right.0));
+    let expected_plan = expected
+        .iter()
+        .map(|(path, pixels)| {
+            (
+                path.clone(),
+                ArtifactKind::Png,
+                Some(*pixels),
+                Some(*pixels),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected_plan);
+
+    let report = service.generate(workspace.path(), &job)?;
+    assert_eq!(report.artifacts().len(), 57);
+    let output = workspace.path().join("generated");
+    let snapshot = snapshot_files(&output)?;
+    assert_eq!(snapshot.len(), 57);
+    assert_eq!(
+        snapshot.keys().cloned().collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let smallest = ImageReader::open(output.join("windows/msix/Assets/AppList.targetsize-16.png"))?
+        .decode()?;
+    let largest =
+        ImageReader::open(output.join("windows/msix/Assets/MedTile.scale-400.png"))?.decode()?;
+    assert_eq!(smallest.width(), 16);
+    assert_eq!(smallest.height(), 16);
+    assert_eq!(largest.width(), 600);
+    assert_eq!(largest.height(), 600);
+    assert_eq!(
+        snapshot.get("windows/msix/Assets/AppList.targetsize-16.png"),
+        snapshot.get("windows/msix/Assets/AppList.targetsize-16_altform-unplated.png")
+    );
+    assert_eq!(
+        snapshot.get("windows/msix/Assets/AppList.targetsize-16.png"),
+        snapshot.get("windows/msix/Assets/AppList.targetsize-16_altform-lightunplated.png")
+    );
     Ok(())
 }
 
@@ -207,4 +279,35 @@ fn assert_plan_matches_oracle(plan: &app_icon_domain::IconPlan) {
     expected.sort_by(|left, right| left.0.cmp(right.0));
 
     assert_eq!(actual, expected);
+}
+
+fn expected_windows_msix_matrix() -> Vec<(String, u32)> {
+    const TARGET_SIZES: [u32; 14] = [16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256];
+    const TARGET_SUFFIXES: [&str; 3] = ["", "_altform-unplated", "_altform-lightunplated"];
+    const SCALE_QUALIFIERS: [u16; 5] = [100, 125, 150, 200, 400];
+    const SCALED_ASSETS: [(&str, [u32; 5]); 3] = [
+        ("AppList", [44, 55, 66, 88, 176]),
+        ("MedTile", [150, 188, 225, 300, 600]),
+        ("StoreLogo", [50, 63, 75, 100, 200]),
+    ];
+
+    let mut expected = Vec::with_capacity(57);
+    for size in TARGET_SIZES {
+        for suffix in TARGET_SUFFIXES {
+            expected.push((
+                format!("windows/msix/Assets/AppList.targetsize-{size}{suffix}.png"),
+                size,
+            ));
+        }
+    }
+    for (stem, pixels) in SCALED_ASSETS {
+        for (scale, pixels) in SCALE_QUALIFIERS.into_iter().zip(pixels) {
+            expected.push((
+                format!("windows/msix/Assets/{stem}.scale-{scale}.png"),
+                pixels,
+            ));
+        }
+    }
+    expected.sort_by(|left, right| left.0.cmp(&right.0));
+    expected
 }

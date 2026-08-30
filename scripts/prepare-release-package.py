@@ -10,9 +10,16 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
+
+SCRIPTS_ROOT = Path(__file__).resolve().parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+from release_targets import CONTRACT_PATH, ReleaseTarget, load_contract
 
 
 STATIC_PATHS = (
@@ -28,20 +35,22 @@ STATIC_PATHS = (
 )
 
 
-def installed_binary_name(target: str) -> str:
-    if target == "x86_64-pc-windows-msvc":
-        return "app-icon-toolkit-mcp.exe"
-    if target in {
-        "x86_64-unknown-linux-gnu",
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-    }:
-        return "app-icon-toolkit-mcp"
-    raise RuntimeError(f"unsupported release target: {target}")
+def installed_binary_name(target: str, plugin_root: Path | None = None) -> str:
+    contract_path = (
+        CONTRACT_PATH if plugin_root is None else plugin_root / "scripts" / "release-targets.json"
+    )
+    return load_contract(contract_path).target(target).binary_name
+
+
+def validate_archive_format(target: ReleaseTarget, requested_format: str) -> None:
+    if requested_format != target.archive_format:
+        raise RuntimeError(
+            f"release target {target.id} requires {target.archive_format}, not {requested_format}"
+        )
 
 
 def copy_package(
-    plugin_root: Path, package_root: Path, binary: Path, target: str
+    plugin_root: Path, package_root: Path, binary: Path, target: ReleaseTarget
 ) -> Path:
     for relative in STATIC_PATHS:
         source = plugin_root / relative
@@ -51,7 +60,7 @@ def copy_package(
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
 
-    installed_name = installed_binary_name(target)
+    installed_name = target.binary_name
     installed_binary = package_root / "bin" / installed_name
     installed_binary.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(binary, installed_binary)
@@ -109,17 +118,26 @@ def main() -> None:
     arguments = parser.parse_args()
 
     plugin_root = arguments.plugin_root.resolve(strict=True)
-    binary = arguments.binary.resolve(strict=True)
+    binary = Path(os.path.abspath(arguments.binary))
+    if binary.is_symlink() or not binary.is_file() or binary.stat().st_size == 0:
+        raise SystemExit(f"release binary must be a non-empty regular non-symlink file: {binary}")
+    target = load_contract(plugin_root / "scripts" / "release-targets.json").target(
+        arguments.target
+    )
+    try:
+        validate_archive_format(target, arguments.format)
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    archive_name = f"app-icon-toolkit-{arguments.tag}-{arguments.target}.{arguments.format}"
+    archive_name = target.release_filename(arguments.tag)
     destination = output / archive_name
     if destination.exists():
         raise SystemExit(f"refusing to replace existing release archive: {destination}")
 
     with tempfile.TemporaryDirectory(prefix="app-icon-toolkit-package-") as temporary:
         package_root = Path(temporary) / "app-icon-toolkit"
-        copy_package(plugin_root, package_root, binary, arguments.target)
+        copy_package(plugin_root, package_root, binary, target)
         subprocess.run(
             [
                 os.environ.get("PYTHON", "python3"),

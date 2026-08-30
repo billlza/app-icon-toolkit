@@ -5,6 +5,7 @@ PYTHONWARNINGS=error
 export PYTHONWARNINGS
 
 plugin_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$plugin_root"
 
 python3 -m unittest discover -s "$plugin_root/scripts/tests" -p 'test_*.py'
 cargo fmt --manifest-path "$plugin_root/Cargo.toml" --all -- --check
