@@ -3,6 +3,15 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.1.2 - 2026-08-30
+
+### Fixed
+
+- Replace the warning-producing artifact download action in the publication
+  job with exact-name GitHub CLI downloads and explicit four-file validation.
+- Close every packaged MCP smoke-test process stream deterministically and run
+  Python release checks with warnings promoted to errors.
+
 ## 0.1.1 - 2026-08-30
 
 ### Fixed

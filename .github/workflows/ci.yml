@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONWARNINGS: error
+
 jobs:
   dependency-policy:
     runs-on: ubuntu-latest

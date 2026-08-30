@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import struct
 import subprocess
 import tempfile
@@ -17,6 +18,22 @@ import zlib
 
 PROTOCOL_VERSION = "2025-11-25"
 EXPECTED_ARTIFACTS = 44
+STDERR_CAPTURE_LIMIT = 64 * 1024
+DIAGNOSTIC_OVERLAP = 64
+DISALLOWED_DIAGNOSTIC = re.compile(
+    r"\b(?:WARN(?:ING)?|ERROR)(?=[:\s])|\b[A-Za-z]+Warning:|\[DEP[0-9]+\]",
+    flags=re.IGNORECASE,
+)
+
+
+class McpProcessFailure(RuntimeError):
+    def __init__(self, issues: list[tuple[str, Exception]]) -> None:
+        self.issues = tuple(issues)
+        details = "; ".join(
+            f"{stage}: {type(error).__name__}: {str(error)!r}"
+            for stage, error in self.issues
+        )
+        super().__init__(f"MCP process validation failed: {details}")
 
 
 def _require_string(value: object, field: str) -> str:
@@ -138,10 +155,44 @@ class McpProcess:
             ) from error
         if self._process.stdin is None or self._process.stdout is None:
             raise RuntimeError("MCP process did not expose stdio")
+        if self._process.stderr is None:
+            raise RuntimeError("MCP process did not expose stderr")
+        self._start_readers()
+
+    def _start_readers(self) -> None:
         self._messages: queue.Queue[dict[str, object] | BaseException | None] = queue.Queue()
         self._seen: list[dict[str, object]] = []
+        self._stderr_capture = ""
+        self._stderr_truncated = False
+        self._stderr_overlap = ""
+        self._stderr_has_ansi = False
+        self._stderr_has_disallowed_diagnostic = False
+        self._stderr_error: Exception | None = None
+        self._closed = False
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
         self._reader.start()
+        self._stderr_reader.start()
+
+    def __enter__(self) -> McpProcess:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: object,
+    ) -> bool:
+        try:
+            self.close()
+        except Exception as shutdown_error:
+            if isinstance(exception, Exception):
+                raise ExceptionGroup(
+                    "MCP protocol exchange and shutdown both failed",
+                    [exception, shutdown_error],
+                ) from None
+            raise
+        return False
 
     def _read_stdout(self) -> None:
         if self._process.stdout is None:
@@ -163,6 +214,31 @@ class McpProcess:
         finally:
             self._messages.put(None)
 
+    def _read_stderr(self) -> None:
+        if self._process.stderr is None:
+            self._stderr_error = RuntimeError("MCP stderr is unavailable")
+            return
+        try:
+            while chunk := self._process.stderr.read(8192):
+                diagnostic_probe = self._stderr_overlap + chunk
+                self._stderr_has_ansi |= "\x1b" in diagnostic_probe
+                self._stderr_has_disallowed_diagnostic |= bool(
+                    DISALLOWED_DIAGNOSTIC.search(diagnostic_probe)
+                )
+                self._stderr_overlap = diagnostic_probe[-DIAGNOSTIC_OVERLAP:]
+                remaining = STDERR_CAPTURE_LIMIT - len(self._stderr_capture)
+                if remaining > 0:
+                    self._stderr_capture += chunk[:remaining]
+                if len(chunk) > remaining:
+                    self._stderr_truncated = True
+        except Exception as error:
+            self._stderr_error = error
+
+    def _captured_stderr(self) -> str:
+        if self._stderr_truncated:
+            return f"{self._stderr_capture}\n...[stderr truncated]"
+        return self._stderr_capture
+
     def send(self, message: dict[str, object]) -> None:
         if self._process.stdin is None:
             raise RuntimeError("MCP stdin is closed")
@@ -180,22 +256,108 @@ class McpProcess:
                 return item
 
     def close(self) -> None:
-        if self._process.stdin is None:
-            raise RuntimeError("MCP stdin is unavailable during shutdown")
-        self._process.stdin.close()
-        return_code = self._process.wait(timeout=10)
-        self._reader.join(timeout=10)
-        if self._reader.is_alive():
-            raise RuntimeError("MCP stdout reader did not stop")
-        stderr = ""
-        if self._process.stderr is not None:
-            stderr = self._process.stderr.read()
-        if return_code != 0:
-            raise RuntimeError(f"MCP process exited with {return_code}: {stderr}")
-        if "\x1b" in stderr:
-            raise RuntimeError("MCP stderr contained ANSI escape sequences")
+        if self._closed:
+            return
+        self._closed = True
+
+        stdin = self._process.stdin
+        stdout = self._process.stdout
+        stderr_stream = self._process.stderr
+        issues: list[tuple[str, Exception]] = []
+        return_code: int | None = None
+
+        if stdin is None:
+            issues.append(("validate stdin", RuntimeError("stdin is unavailable")))
+        else:
+            try:
+                stdin.close()
+            except Exception as error:
+                issues.append(("close stdin", error))
+
+        try:
+            return_code = self._process.wait(timeout=10)
+        except subprocess.TimeoutExpired as error:
+            issues.append(("wait for graceful shutdown", error))
+        except Exception as error:
+            issues.append(("wait for graceful shutdown", error))
+
+        if return_code is None:
+            process_is_running = True
+            try:
+                observed_return_code = self._process.poll()
+                process_is_running = observed_return_code is None
+                if observed_return_code is not None:
+                    return_code = observed_return_code
+            except Exception as error:
+                issues.append(("inspect process after failed wait", error))
+            if process_is_running:
+                try:
+                    self._process.kill()
+                except Exception as error:
+                    issues.append(("kill process after failed wait", error))
+            try:
+                return_code = self._process.wait(timeout=10)
+            except Exception as error:
+                issues.append(("reap process after failed wait", error))
+
+        for name, reader in (
+            ("stdout", self._reader),
+            ("stderr", self._stderr_reader),
+        ):
+            try:
+                reader.join(timeout=10)
+            except Exception as error:
+                issues.append((f"join {name} reader", error))
+            try:
+                if reader.is_alive():
+                    issues.append(
+                        (f"join {name} reader", RuntimeError("reader did not stop"))
+                    )
+            except Exception as error:
+                issues.append((f"inspect {name} reader", error))
+
+        for name, stream in (
+            ("stdin", stdin),
+            ("stdout", stdout),
+            ("stderr", stderr_stream),
+        ):
+            if stream is None:
+                issues.append(
+                    (f"close {name}", RuntimeError(f"{name} stream is unavailable"))
+                )
+                continue
+            try:
+                stream.close()
+            except Exception as error:
+                issues.append((f"close {name}", error))
+
+        if self._stderr_error is not None:
+            issues.append(("read stderr", self._stderr_error))
+        stderr = self._captured_stderr()
+        if return_code not in (None, 0):
+            issues.append(
+                (
+                    "process exit",
+                    RuntimeError(f"exit code {return_code}; stderr={stderr!r}"),
+                )
+            )
+        if self._stderr_has_ansi:
+            issues.append(
+                ("validate stderr", RuntimeError("stderr contained ANSI escapes"))
+            )
+        if self._stderr_has_disallowed_diagnostic:
+            issues.append(
+                (
+                    "validate stderr",
+                    RuntimeError(f"stderr contained an error or warning: {stderr!r}"),
+                )
+            )
         if not self._seen:
-            raise RuntimeError("MCP process produced no protocol messages")
+            issues.append(
+                ("validate protocol", RuntimeError("no protocol messages were produced"))
+            )
+        if issues:
+            raise McpProcessFailure(issues)
 
 
 def structured_content(response: dict[str, object]) -> dict[str, object]:
@@ -241,7 +403,7 @@ def run_smoke(plugin_root: Path) -> None:
             write_opaque_png(workspace / "sources" / f"{name}.png")
 
         mcp = McpProcess(plugin_root)
-        try:
+        with mcp:
             mcp.send(
                 {
                     "jsonrpc": "2.0",
@@ -313,8 +475,6 @@ def run_smoke(plugin_root: Path) -> None:
             failure = structured_content(duplicate)
             if failure.get("code") != "OUTPUT_EXISTS":
                 raise RuntimeError(f"duplicate generation returned the wrong error: {failure}")
-        finally:
-            mcp.close()
 
 
 def main() -> None:
