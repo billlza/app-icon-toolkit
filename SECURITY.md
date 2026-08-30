@@ -34,13 +34,13 @@ oversized image inputs, destination replacement, partial output publication,
 and unbounded concurrent generation. It does not sandbox the caller-selected
 workspace root or protect against an operating-system administrator.
 
-The transaction records the staging directory's filesystem identity and
-reconciles both names after every native rename result. It performs no
-recursive staging cleanup after generation has started. If the namespace cannot
-prove whether the original staging object became final, the tool preserves the
-evidence and returns `ATOMIC_PUBLISH_INDETERMINATE` with `reconcile_first`; it
-never treats that state as success, ordinary failure, or permission to retry
-automatically.
+The transaction keeps the original staging directory open through validation,
+rename, and reconciliation, and compares both names against that live pin after
+every native result. It performs no recursive staging cleanup after generation
+has started. If the namespace cannot prove whether the pinned object became
+final, the tool preserves the evidence and returns
+`ATOMIC_PUBLISH_INDETERMINATE` with `reconcile_first`; it never treats that
+state as success, ordinary failure, or permission to retry automatically.
 
 The publication primitive protects namespace integrity and atomic visibility;
 it is not a cryptographic integrity mechanism and does not promise complete
@@ -57,17 +57,18 @@ force an indeterminate result or denial of service. Preserving staging on every
 post-creation failure avoids deleting a replacement object through a raceable
 name.
 
-On Unix, the no-replace rename API remains path-based. The engine rechecks
-staging identity immediately before the syscall, but an equally privileged
-process can replace the source in the remaining window. Reconciliation will
-mark a different final identity indeterminate; callers must not consume that
-final directory as trusted output.
+On Unix, the no-replace rename API remains path-based. The engine reopens and
+compares staging with the pinned directory immediately before the syscall, but
+an equally privileged process can replace the source in the remaining window.
+Reconciliation will mark a different final object indeterminate; callers must
+not consume that final directory as trusted output.
 
-Directory identity does not protect file contents from a process running as the
-same user. Such a process can modify staging after readback validation or final
-after publication without changing directory identity. Run generation in a
-workspace that excludes equally privileged concurrent writers; this project
-does not add hashes, signatures, or encryption to ordinary local icon assets.
+An open directory handle does not protect file contents from a process running
+as the same user. Such a process can modify staging after readback validation
+or final after publication without replacing the directory object. Run
+generation in a workspace that excludes equally privileged concurrent writers;
+this project does not add hashes, signatures, or encryption to ordinary local
+icon assets.
 
 Release scripts execute platform SDK validators in CI and development gates,
 including MakePri and MakeAppx for the generated MSIX resource matrix. The MCP

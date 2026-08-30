@@ -31,13 +31,14 @@ it cannot call the engine or understand icon jobs.
 5. Generation writes exclusively into a sibling staging directory,
    synchronizes each file, reads it back, and validates its native encoding
    contract.
-6. The transaction records the staging directory's filesystem object identity.
+6. The transaction pins the staging directory with a live filesystem handle.
 7. The publisher atomically renames staging to the final name with no-replace
-   semantics, then reconciles the staging and final names against that identity
-   regardless of the native result.
+   semantics, then opens and reconciles the staging and final names against that
+   live pin regardless of the native result.
 8. A proven collision is a stable `OUTPUT_EXISTS` failure. A proven successful
    rename succeeds even if a network filesystem returned a late error. An
-   unprovable result is `ATOMIC_PUBLISH_INDETERMINATE` and preserves both names.
+   unprovable result is `ATOMIC_PUBLISH_INDETERMINATE` and never deletes any
+   staging or final entry still present.
 9. Failures after staging creation preserve staging and return its path while
    retaining the typed primary error and stable code. There is no recursive
    name-based cleanup in the transaction path.
@@ -55,31 +56,33 @@ capability. Windows uses `NtSetInformationFile(FileRenameInformation)` with
 filesystems fail explicitly; there is no ambient absolute-path or copy/delete
 fallback.
 
-The Windows adapter validates the source handle as a non-reparse directory and
-denies delete sharing so that link cannot move after validation. It records
-`FILE_ID_INFO` (volume serial number plus 128-bit file ID) and rechecks the
-expected identity before rename. Unix reconciliation uses device and inode.
-The adapter contains the only project-authored unsafe blocks, and native buffer
-sizes and offsets are checked against the Windows API bindings.
+The Windows adapter opens staging once as a non-reparse, rename-capable
+directory and denies delete sharing so that link cannot move after validation.
+The same handle is used for artifact I/O and native rename. `FILE_ID_INFO`
+(volume serial number plus 128-bit file ID) is queried only to compare two live
+handles; it is never retained as durable identity. Unix pins a no-follow
+directory descriptor and likewise compares two live descriptor metadata
+snapshots. The adapter contains the only project-authored unsafe blocks, and
+native buffer sizes and offsets are checked against the Windows API bindings.
 
-Unix rechecks the staging identity immediately before the path-based
-`renameat_with` call. No portable Unix API binds the rename source to an open
-directory handle, so an equally privileged process can still replace the name
-in that final syscall window. Post-rename reconciliation will return
-indeterminate rather than accept a different final identity; such a final must
-be treated as untrusted evidence, not generated output.
+Unix reopens and compares the staging name with the live pin immediately before
+the path-based `renameat_with` call. No portable Unix API binds the rename
+source to an open directory handle, so an equally privileged process can still
+replace the name in that final syscall window. Post-rename reconciliation will
+return indeterminate rather than accept a different final object; such a final
+must be treated as untrusted evidence, not generated output.
 
-Directory identity does not freeze file contents. A process with the same user
-permissions can mutate files inside staging after validation, or inside final
-after publication, without changing the directory identity. The engine is not
-a sandbox or cryptographic integrity boundary; callers must grant an exclusive
-workspace against equally privileged concurrent writers while generating and
-consuming output.
+Pinning a directory handle does not freeze file contents. A process with the
+same user permissions can mutate files inside staging after validation, or
+inside final after publication, without changing the directory object. The
+engine is not a sandbox or cryptographic integrity boundary; callers must grant
+an exclusive workspace against equally privileged concurrent writers while
+generating and consuming output.
 
 The reconciliation classifier is a pure state machine under
-`transaction/reconcile.rs`. If the final name has the original staging
-identity and the staging name no longer does, publication is proven. If an
-error leaves the original object at staging and final is absent or different,
+`transaction/reconcile.rs`. If the final name resolves to the pinned staging
+object and the staging name no longer does, publication is proven. If an error
+leaves the pinned object at staging and final is absent or different,
 non-publication is proven. Missing, replaced, simultaneous, or unobservable
 states are indeterminate and are never cleaned automatically. Proven
 non-publication also preserves staging because a later recursive delete by name

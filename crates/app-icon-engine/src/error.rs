@@ -134,17 +134,17 @@ pub enum EngineError {
         source: io::Error,
     },
 
-    /// The newly created staging directory could not be assigned a stable
-    /// filesystem identity, so it is preserved instead of being deleted by name.
+    /// A live handle pin could not be acquired for the newly created staging
+    /// directory, so it is preserved instead of being deleted by name.
     #[error(
-        "failed to identify staging directory `{staging_path}` for `{path}`; it was preserved: {source}"
+        "failed to pin staging directory `{staging_path}` for `{path}`; it was preserved: {source}"
     )]
     StagingIdentity {
         /// Intended final output directory.
         path: RelativePath,
         /// Workspace-relative staging directory that may require inspection.
         staging_path: RelativePath,
-        /// Filesystem identity lookup failure.
+        /// Live directory-handle acquisition failure.
         source: io::Error,
     },
 

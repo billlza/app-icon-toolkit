@@ -95,11 +95,12 @@ request returns a structured `BUSY` error instead of joining an unbounded
 queue. Separate engine callers racing for the same destination are protected
 by the filesystem no-replace primitive: exactly one can publish.
 
-The transaction records the staging directory's filesystem identity. After any
-native rename result it compares that identity at the staging and final names.
-If the result cannot be proven, the server returns
-`ATOMIC_PUBLISH_INDETERMINATE`, preserves the evidence, and marks the response
-`reconcile_first` instead of deleting by name or encouraging a blind retry.
+The transaction pins the staging directory with a live filesystem handle.
+After any native rename result it opens the staging and final names and compares
+their live objects with that pin. If the result cannot be proven, the server
+returns `ATOMIC_PUBLISH_INDETERMINATE`, preserves the evidence, and marks the
+response `reconcile_first` instead of deleting by name or encouraging a blind
+retry.
 
 ## Input and filesystem contract
 

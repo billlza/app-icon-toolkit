@@ -20,8 +20,9 @@ use windows_sys::Win32::{
     },
     Storage::FileSystem::{
         DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandleEx, SYNCHRONIZE,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo,
+        GetFileInformationByHandleEx, SYNCHRONIZE,
     },
     System::IO::{IO_STATUS_BLOCK, IO_STATUS_BLOCK_0},
 };
@@ -32,15 +33,34 @@ const FILE_RENAME_INFO_TAIL_UNITS: usize = (size_of::<FILE_RENAME_INFORMATION>()
 .div_ceil(size_of::<u16>());
 const FILE_NAME_BUFFER_UNITS: usize = MAX_FILE_NAME_UNITS + FILE_RENAME_INFO_TAIL_UNITS;
 
-/// Stable object identity for one directory on a Windows volume.
-///
-/// The volume serial number and 128-bit file ID are queried from an open
-/// handle, so callers can distinguish the original staging directory from a
-/// different object that later appears under the same name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DirectoryIdentity {
+struct DirectoryIdentity {
     volume_serial_number: u64,
     file_id: [u8; 16],
+}
+
+/// Opens staging and keeps the same writable, rename-capable handle live.
+///
+/// The handle remains live through validation, rename, and reconciliation. Its
+/// sharing mode prevents the source link from being deleted or renamed, and
+/// the handle itself is used for the native rename.
+pub struct PinnedDirectory {
+    directory: Dir,
+}
+
+impl PinnedDirectory {
+    /// Returns the capability used for child artifact I/O.
+    #[must_use]
+    pub fn directory(&self) -> &Dir {
+        &self.directory
+    }
+
+    /// Compares the pinned object with the object currently named below `parent`.
+    pub fn matches_name(&self, parent: &Dir, name: &str) -> io::Result<bool> {
+        validate_component(name).map_err(rename_error_into_io)?;
+        let candidate = open_identity_directory(parent, name)?;
+        Ok(identity_from_handle(&self.directory)? == identity_from_handle(&candidate)?)
+    }
 }
 
 /// A classified failure from the Windows no-replace rename primitive.
@@ -77,37 +97,30 @@ impl Error for RenameError {
 
 /// Atomically renames a child directory without replacing any destination.
 ///
-/// Both names must be single ordinary path components below `parent`. The
-/// source is opened relative to that capability and the destination remains
-/// relative to the same parent handle throughout the native operation. No
-/// ambient absolute path or process current directory participates.
+/// The source is the already pinned handle used for artifact I/O. The
+/// destination must be one ordinary path component below `parent` and remains
+/// relative to that parent handle throughout the native operation. No ambient
+/// absolute path or process current directory participates.
 pub fn rename_directory_no_replace(
     parent: &Dir,
-    source_name: &str,
     destination_name: &str,
-    expected_identity: DirectoryIdentity,
+    source: &PinnedDirectory,
 ) -> Result<(), RenameError> {
-    validate_component(source_name)?;
     let destination = encode_component(destination_name)?;
-    let source = open_source_directory(parent, source_name).map_err(RenameError::Other)?;
-    let actual_identity = identity_from_file(&source).map_err(RenameError::Other)?;
-    if actual_identity != expected_identity {
-        return Err(invalid_input(
-            "source directory identity changed before publication",
-        ));
-    }
     let mut rename = RenameInfoBuffer::new(parent, &destination)?;
     let rename_size = rename.byte_len()?;
 
-    call_nt_set_information(parent, &source, &mut rename, rename_size)
+    call_nt_set_information(parent, &source.directory, &mut rename, rename_size)
         .map_err(classify_rename_error)
 }
 
-/// Returns the handle-derived identity of a non-reparse child directory.
-pub fn directory_identity(parent: &Dir, name: &str) -> io::Result<DirectoryIdentity> {
+/// Opens a non-reparse child directory and keeps its rename-capable handle live.
+pub fn pin_directory(parent: &Dir, name: &str) -> io::Result<PinnedDirectory> {
     validate_component(name).map_err(rename_error_into_io)?;
-    let directory = open_source_directory(parent, name)?;
-    identity_from_file(&directory)
+    let source = open_pinned_directory(parent, name)?;
+    Ok(PinnedDirectory {
+        directory: Dir::from_std_file(source.into_std()),
+    })
 }
 
 fn validate_component(component: &str) -> Result<(), RenameError> {
@@ -158,15 +171,31 @@ fn is_device_suffix(suffix: &str) -> bool {
     )
 }
 
-fn open_source_directory(parent: &Dir, source_name: &str) -> io::Result<cap_std::fs::File> {
+fn open_pinned_directory(parent: &Dir, source_name: &str) -> io::Result<cap_std::fs::File> {
     let mut options = OpenOptions::new();
     options
-        .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .access_mode(FILE_GENERIC_READ | DELETE | SYNCHRONIZE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
 
     let source = parent.open_with(source_name, &options)?;
-    let attributes = source.metadata()?.file_attributes();
+    validate_directory_attributes(source.metadata()?.file_attributes())?;
+    Ok(source)
+}
+
+fn open_identity_directory(parent: &Dir, source_name: &str) -> io::Result<cap_std::fs::File> {
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+
+    let source = parent.open_with(source_name, &options)?;
+    validate_directory_attributes(source.metadata()?.file_attributes())?;
+    Ok(source)
+}
+
+fn validate_directory_attributes(attributes: u32) -> io::Result<()> {
     if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -179,18 +208,18 @@ fn open_source_directory(parent: &Dir, source_name: &str) -> io::Result<cap_std:
             "source is a reparse point",
         ));
     }
-    Ok(source)
+    Ok(())
 }
 
 #[allow(unsafe_code)]
-fn identity_from_file(file: &cap_std::fs::File) -> io::Result<DirectoryIdentity> {
+fn identity_from_handle(handle: &impl AsRawHandle) -> io::Result<DirectoryIdentity> {
     let mut information = FILE_ID_INFO::default();
-    // SAFETY: `file` owns a live handle opened with FILE_READ_ATTRIBUTES;
+    // SAFETY: `handle` refers to a live handle opened with FILE_READ_ATTRIBUTES;
     // `information` is a correctly sized writable FILE_ID_INFO buffer for the
     // requested FileIdInfo class and remains live for the duration of the call.
     let succeeded = unsafe {
         GetFileInformationByHandleEx(
-            file.as_raw_handle().cast(),
+            handle.as_raw_handle().cast(),
             FileIdInfo,
             std::ptr::from_mut(&mut information).cast(),
             u32::try_from(size_of::<FILE_ID_INFO>())
@@ -295,7 +324,7 @@ const _: () = {
 #[allow(unsafe_code)]
 fn call_nt_set_information(
     parent: &Dir,
-    source: &cap_std::fs::File,
+    source: &Dir,
     rename: &mut RenameInfoBuffer,
     rename_size: u32,
 ) -> io::Result<()> {
@@ -355,9 +384,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FILE_NAME_BUFFER_UNITS, FILE_RENAME_INFO_TAIL_UNITS, FILE_RENAME_INFORMATION,
-        MAX_FILE_NAME_UNITS, RenameError, RenameInfoBuffer, directory_identity, encode_component,
-        open_source_directory, rename_directory_no_replace,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_NAME_BUFFER_UNITS,
+        FILE_RENAME_INFO_TAIL_UNITS, FILE_RENAME_INFORMATION, MAX_FILE_NAME_UNITS, RenameError,
+        RenameInfoBuffer, encode_component, pin_directory, rename_directory_no_replace,
+        validate_directory_attributes,
     };
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -403,7 +433,7 @@ mod tests {
         fs::create_dir(&outside_path)?;
         fs::create_dir(scoped_path.join("staging"))?;
         let parent = Dir::open_ambient_dir(&scoped_path, ambient_authority())?;
-        let source = open_source_directory(&parent, "staging")?;
+        let source = pin_directory(&parent, "staging")?;
 
         let move_while_open = fs::rename(scoped_path.join("staging"), outside_path.join("moved"));
         assert!(move_while_open.is_err());
@@ -417,41 +447,85 @@ mod tests {
     }
 
     #[test]
-    fn renames_relative_to_parent_without_replacement() -> TestResult {
+    fn pin_rejects_non_directories_and_reparse_attributes() -> TestResult {
         let temporary = tempdir()?;
-        fs::create_dir(temporary.path().join("staging"))?;
-        fs::write(temporary.path().join("staging/sentinel"), b"complete")?;
+        fs::write(temporary.path().join("ordinary-file"), b"not a directory")?;
         let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
-        let expected_identity = directory_identity(&parent, "staging")?;
 
-        rename_directory_no_replace(&parent, "staging", "published", expected_identity)?;
-
-        assert!(!temporary.path().join("staging").exists());
-        assert_eq!(directory_identity(&parent, "published")?, expected_identity);
-        assert_eq!(
-            fs::read(temporary.path().join("published/sentinel"))?,
-            b"complete"
+        let file_error = pin_directory(&parent, "ordinary-file")
+            .err()
+            .ok_or_else(|| io::Error::other("ordinary file was unexpectedly pinned"))?;
+        assert_eq!(file_error.kind(), io::ErrorKind::InvalidInput);
+        assert!(validate_directory_attributes(0).is_err());
+        assert!(
+            validate_directory_attributes(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                .is_err()
         );
+        validate_directory_attributes(FILE_ATTRIBUTE_DIRECTORY)?;
         Ok(())
     }
 
     #[test]
-    fn refuses_to_rename_a_replacement_staging_identity() -> TestResult {
+    fn renames_relative_to_parent_without_replacement() -> TestResult {
+        let temporary = tempdir()?;
+        fs::create_dir(temporary.path().join("staging"))?;
+        let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
+        let source = pin_directory(&parent, "staging")?;
+        source.directory().write("sentinel", b"complete")?;
+
+        rename_directory_no_replace(&parent, "published", &source)?;
+
+        assert!(!temporary.path().join("staging").exists());
+        assert!(source.matches_name(&parent, "published")?);
+        assert_eq!(
+            fs::read(temporary.path().join("published/sentinel"))?,
+            b"complete"
+        );
+        assert!(
+            fs::rename(
+                temporary.path().join("published"),
+                temporary.path().join("moved")
+            )
+            .is_err()
+        );
+        drop(source);
+        fs::rename(
+            temporary.path().join("published"),
+            temporary.path().join("moved"),
+        )?;
+        assert!(temporary.path().join("moved/sentinel").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn live_pin_distinguishes_another_directory() -> TestResult {
+        let temporary = tempdir()?;
+        fs::create_dir(temporary.path().join("staging-a"))?;
+        fs::create_dir(temporary.path().join("staging-b"))?;
+        let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
+        let source = pin_directory(&parent, "staging-a")?;
+
+        assert!(source.matches_name(&parent, "staging-a")?);
+        assert!(!source.matches_name(&parent, "staging-b")?);
+        assert!(temporary.path().join("staging-a").is_dir());
+        assert!(temporary.path().join("staging-b").is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_source_cannot_be_replaced_before_publication() -> TestResult {
         let temporary = tempdir()?;
         let staging = temporary.path().join("staging");
         fs::create_dir(&staging)?;
         let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
-        let expected_identity = directory_identity(&parent, "staging")?;
-        fs::remove_dir(&staging)?;
-        fs::create_dir(&staging)?;
+        let source = pin_directory(&parent, "staging")?;
 
-        let error = rename_directory_no_replace(&parent, "staging", "published", expected_identity)
-            .err()
-            .ok_or_else(|| io::Error::other("replacement staging was unexpectedly published"))?;
+        assert!(fs::remove_dir(&staging).is_err());
+        assert!(source.matches_name(&parent, "staging")?);
+        rename_directory_no_replace(&parent, "published", &source)?;
 
-        assert!(matches!(error, RenameError::Other(_)));
-        assert!(staging.is_dir());
-        assert!(!temporary.path().join("published").exists());
+        assert!(!staging.exists());
+        assert!(temporary.path().join("published").is_dir());
         Ok(())
     }
 
@@ -469,12 +543,11 @@ mod tests {
                 fs::write(&destination, b"file")?;
             }
             let parent = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
-            let expected_identity = directory_identity(&parent, "staging")?;
+            let source = pin_directory(&parent, "staging")?;
 
-            let error =
-                rename_directory_no_replace(&parent, "staging", "published", expected_identity)
-                    .err()
-                    .ok_or_else(|| io::Error::other("existing destination was replaced"))?;
+            let error = rename_directory_no_replace(&parent, "published", &source)
+                .err()
+                .ok_or_else(|| io::Error::other("existing destination was replaced"))?;
 
             assert!(matches!(error, RenameError::AlreadyExists));
             assert!(temporary.path().join("staging/source").is_file());
@@ -505,10 +578,9 @@ mod tests {
                 let parent = Dir::open_ambient_dir(&parent_path, ambient_authority())
                     .map_err(RenameError::Other)?;
                 let source_name = format!("staging-{index}");
-                let expected_identity =
-                    directory_identity(&parent, &source_name).map_err(RenameError::Other)?;
+                let source = pin_directory(&parent, &source_name).map_err(RenameError::Other)?;
                 worker_barrier.wait();
-                rename_directory_no_replace(&parent, &source_name, "published", expected_identity)
+                rename_directory_no_replace(&parent, "published", &source)
             }));
         }
         barrier.wait();

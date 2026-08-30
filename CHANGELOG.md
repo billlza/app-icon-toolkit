@@ -34,6 +34,8 @@ Semantic Versioning.
   ordinary failure.
 - Retain typed primary errors and preserve staging on every post-creation
   failure, avoiding recursive deletion through a raceable directory name.
+- Keep the original staging directory handle live through reconciliation so
+  inode or file-ID reuse cannot make a replacement object appear validated.
 
 ## 0.1.2 - 2026-08-30
 

@@ -129,4 +129,44 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn classifies_the_complete_native_and_namespace_state_matrix() {
+        let states = [
+            EntryState::Missing,
+            EntryState::Expected,
+            EntryState::Different,
+            EntryState::Unobservable("injected observation failure".to_owned()),
+        ];
+
+        let mut published = 0;
+        let mut not_published = 0;
+        let mut indeterminate = 0;
+        for native in [NativeResult::Succeeded, NativeResult::Failed] {
+            for staging in &states {
+                for final_entry in &states {
+                    let resolution = resolve(native, staging, final_entry);
+                    if matches!(final_entry, EntryState::Expected)
+                        && !matches!(staging, EntryState::Expected)
+                    {
+                        assert_eq!(resolution, Resolution::Published);
+                        published += 1;
+                    } else if native == NativeResult::Failed
+                        && matches!(staging, EntryState::Expected)
+                        && matches!(final_entry, EntryState::Missing | EntryState::Different)
+                    {
+                        assert_eq!(resolution, Resolution::NotPublished);
+                        not_published += 1;
+                    } else {
+                        assert!(matches!(resolution, Resolution::Indeterminate(_)));
+                        indeterminate += 1;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(published, 6);
+        assert_eq!(not_published, 2);
+        assert_eq!(indeterminate, 24);
+    }
 }
