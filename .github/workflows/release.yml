@@ -15,14 +15,14 @@ jobs:
   policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check advisories, licenses, and dependency sources
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
           command-arguments: advisories licenses sources
       - name: Install cargo-about
-        run: cargo install --locked --version 0.9.2 cargo-about
+        run: cargo install --locked --version 0.9.2 --features cli cargo-about
       - name: Verify generated third-party notices
         run: ./scripts/check-licenses.sh
 
@@ -33,7 +33,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install minimum supported Rust
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check with minimum supported Rust
@@ -68,7 +68,7 @@ jobs:
             python: python
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify release version
         run: ${{ matrix.python }} scripts/check-release-version.py "${{ github.ref_name }}"
       - name: Install Rust target
@@ -87,13 +87,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes desktop-file-utils icoutils
-          sdkmanager "build-tools;37.0.0" "platforms;android-37.0"
+          test -n "${ANDROID_HOME:-}"
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "build-tools;37.0.0" "platforms;android-37.0"
       - name: Validate Linux, Android, and Windows output formats
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
           ANDROID_BUILD_TOOLS_VERSION: 37.0.0
           ANDROID_PLATFORM: android-37.0
-        run: ./scripts/check-native.sh android linux windows
+        run: ANDROID_SDK_ROOT="$ANDROID_HOME" ./scripts/check-native.sh android linux windows
       - name: Validate macOS output format
         if: endsWith(matrix.target, 'apple-darwin')
         run: ./scripts/check-native.sh macos
@@ -116,7 +119,7 @@ jobs:
           --output dist
           --source-date-epoch ${{ steps.source.outputs.epoch }}
       - name: Upload release archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: app-icon-toolkit-${{ matrix.target }}
           path: dist/*
@@ -129,11 +132,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify release version
         run: python3 scripts/check-release-version.py "${{ github.ref_name }}"
       - name: Download release archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           path: release-assets
           merge-multiple: true

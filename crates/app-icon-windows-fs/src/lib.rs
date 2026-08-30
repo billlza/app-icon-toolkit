@@ -24,6 +24,10 @@ use windows_sys::Win32::{
 };
 
 const MAX_FILE_NAME_UNITS: usize = 255;
+const FILE_RENAME_INFO_TAIL_UNITS: usize = (size_of::<FILE_RENAME_INFO>()
+    - offset_of!(FILE_RENAME_INFO, FileName))
+.div_ceil(size_of::<u16>());
+const FILE_NAME_BUFFER_UNITS: usize = MAX_FILE_NAME_UNITS + FILE_RENAME_INFO_TAIL_UNITS;
 
 /// A classified failure from the Windows no-replace rename primitive.
 #[derive(Debug)]
@@ -161,7 +165,7 @@ struct RenameInfoBuffer {
     alignment_padding: u32,
     root_directory: HANDLE,
     file_name_length: u32,
-    file_name: [u16; MAX_FILE_NAME_UNITS],
+    file_name: [u16; FILE_NAME_BUFFER_UNITS],
 }
 
 impl RenameInfoBuffer {
@@ -174,7 +178,7 @@ impl RenameInfoBuffer {
             .checked_mul(size_of::<u16>())
             .and_then(|length| u32::try_from(length).ok())
             .ok_or_else(|| invalid_input("encoded name length overflowed"))?;
-        let mut file_name = [0_u16; MAX_FILE_NAME_UNITS];
+        let mut file_name = [0_u16; FILE_NAME_BUFFER_UNITS];
         file_name[..name.len()].copy_from_slice(name);
 
         Ok(Self {
@@ -188,7 +192,9 @@ impl RenameInfoBuffer {
     }
 
     fn byte_len(&self) -> Result<u32, RenameError> {
-        offset_of!(Self, file_name)
+        // SetFileInformationByHandle requires a full fixed header followed by
+        // FileNameLength bytes, including the header's tail padding.
+        size_of::<FILE_RENAME_INFO>()
             .checked_add(
                 usize::try_from(self.file_name_length)
                     .map_err(|_| invalid_input("encoded name length is not representable"))?,
@@ -208,6 +214,14 @@ const _: () = {
             == offset_of!(FILE_RENAME_INFO, FileNameLength)
     );
     assert!(offset_of!(RenameInfoBuffer, file_name) == offset_of!(FILE_RENAME_INFO, FileName));
+    assert!(
+        offset_of!(RenameInfoBuffer, file_name) + size_of::<[u16; FILE_NAME_BUFFER_UNITS]>()
+            >= size_of::<FILE_RENAME_INFO>() + MAX_FILE_NAME_UNITS * size_of::<u16>()
+    );
+    assert!(
+        size_of::<RenameInfoBuffer>()
+            >= size_of::<FILE_RENAME_INFO>() + MAX_FILE_NAME_UNITS * size_of::<u16>()
+    );
 };
 
 #[allow(unsafe_code)]

@@ -12,9 +12,9 @@ jobs:
   dependency-policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check advisories, licenses, and dependency sources
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
           command-arguments: advisories licenses sources
@@ -26,7 +26,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install minimum supported Rust
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check with minimum supported Rust
@@ -41,7 +41,7 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust components
         run: rustup component add clippy rustfmt
       - name: Check formatting
@@ -74,31 +74,35 @@ jobs:
   license-notices:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install cargo-about
-        run: cargo install --locked --version 0.9.2 cargo-about
+        run: cargo install --locked --version 0.9.2 --features cli cargo-about
       - name: Verify generated third-party notices
         run: ./scripts/check-licenses.sh
 
   native-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate macOS app icon set with actool
         run: ./scripts/check-native.sh macos
 
   native-linux-android-windows:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install independent desktop and ICO validators
         run: |
           sudo apt-get update
           sudo apt-get install --yes desktop-file-utils icoutils
       - name: Install pinned Android SDK components
-        run: sdkmanager "build-tools;37.0.0" "platforms;android-37.0"
+        run: |
+          test -n "${ANDROID_HOME:-}"
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "build-tools;37.0.0" "platforms;android-37.0"
       - name: Validate Android, Linux, and Windows artifacts
         env:
           ANDROID_BUILD_TOOLS_VERSION: 37.0.0
           ANDROID_PLATFORM: android-37.0
-        run: ./scripts/check-native.sh android linux windows
+        run: ANDROID_SDK_ROOT="$ANDROID_HOME" ./scripts/check-native.sh android linux windows
