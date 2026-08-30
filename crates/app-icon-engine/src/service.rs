@@ -10,7 +10,7 @@ use crate::{EngineError, GenerationReport};
 pub struct IconService;
 
 impl IconService {
-    /// Creates an icon service with the fixed first-release profiles.
+    /// Creates an icon service with the fixed supported platform profiles.
     #[must_use]
     pub const fn new() -> Self {
         Self

@@ -187,10 +187,15 @@ class McpProcess:
             self.close()
         except Exception as shutdown_error:
             if isinstance(exception, Exception):
-                raise ExceptionGroup(
-                    "MCP protocol exchange and shutdown both failed",
-                    [exception, shutdown_error],
-                ) from None
+                issues = [("protocol exchange", exception)]
+                if isinstance(shutdown_error, McpProcessFailure):
+                    issues.extend(
+                        (f"shutdown/{stage}", error)
+                        for stage, error in shutdown_error.issues
+                    )
+                else:
+                    issues.append(("shutdown", shutdown_error))
+                raise McpProcessFailure(issues) from None
             raise
         return False
 

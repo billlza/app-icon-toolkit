@@ -3,6 +3,16 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.2.1 - 2026-08-30
+
+### Fixed
+
+- Run release metadata validation on Python 3.10 by using Cargo's authoritative
+  workspace metadata instead of a newer standard-library TOML module.
+- Preserve simultaneous MCP protocol and shutdown failures without relying on
+  Python 3.11 exception groups.
+- Lock release-contract tests to the complete eight-target public archive set.
+
 ## 0.2.0 - 2026-08-30
 
 ### Added

@@ -134,6 +134,34 @@ jobs:
       universal_verify_matrix: ${{ steps.targets.outputs.universal_verify_matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test release scripts with Python 3.10
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+
+          if sys.version_info[:2] != (3, 10):
+              raise SystemExit(f"expected Python 3.10, found {sys.version}")
+          PY
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Verify current release metadata with Python 3.10
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          manifest = json.loads(
+              Path(".codex-plugin/plugin.json").read_text(encoding="utf-8")
+          )
+          version = manifest["version"].split("+", maxsplit=1)[0]
+          subprocess.run(
+              [sys.executable, "scripts/check-release-version.py", f"v{version}"],
+              check=True,
+          )
+          PY
       - id: targets
         name: Load validated release target contract
         shell: bash
