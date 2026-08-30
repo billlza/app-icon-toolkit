@@ -1,0 +1,32 @@
+[package]
+name = "app-icon-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Deterministic renderers and transactional publishers for application icon bundles"
+publish = false
+
+[dependencies]
+app-icon-domain.workspace = true
+cap-std.workspace = true
+ico.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "redox", target_os = "tvos", target_os = "visionos", target_os = "watchos"))'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+app-icon-windows-fs.workspace = true
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[lints]
+workspace = true

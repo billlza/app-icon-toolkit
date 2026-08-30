@@ -1,0 +1,59 @@
+[workspace]
+members = [
+    "crates/app-icon-domain",
+    "crates/app-icon-engine",
+    "crates/app-icon-mcp",
+    "crates/app-icon-windows-fs",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+authors = ["App Icon Toolkit maintainers"]
+repository = "https://github.com/billlza/app-icon-toolkit"
+homepage = "https://github.com/billlza/app-icon-toolkit"
+
+[workspace.dependencies]
+app-icon-domain = { path = "crates/app-icon-domain" }
+app-icon-engine = { path = "crates/app-icon-engine" }
+app-icon-windows-fs = { path = "crates/app-icon-windows-fs" }
+cap-std = { version = "=4.0.3" }
+ico = { version = "=0.5.0" }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+rmcp = { version = "=3.1.4", default-features = false, features = [
+    "macros",
+    "schemars",
+    "server",
+    "transport-io",
+] }
+rustix = { version = "=1.1.4", features = ["fs"] }
+schemars = "=1.2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.0", features = [
+    "io-util",
+    "macros",
+    "rt-multi-thread",
+    "sync",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+windows-sys = { version = "=0.61.2" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+expect_used = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

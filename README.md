@@ -1,0 +1,153 @@
+# App Icon Toolkit
+
+App Icon Toolkit is an open-source local MCP server and Codex plugin written in
+Rust. It turns explicitly supplied PNG artwork into deterministic application
+icon bundles for macOS, Android, Windows, and Linux.
+
+The server generates platform resource files; it does not invent artwork or
+modify an existing IDE project. One request can target all four platforms, and
+the final output directory is published as one no-overwrite transaction.
+
+## What is supported
+
+| Output profile | Generated result | Independent validation |
+| --- | --- | --- |
+| `mac_os_app_icon_set` | macOS `.appiconset` with all 16–512 point 1x/2x slots | Xcode `actool` |
+| `android_adaptive` | legacy density icons plus adaptive foreground, background, and optional monochrome resources | Android AAPT2 |
+| `windows_ico` | one ICO with 16, 24, 32, 48, and 256 pixel frames | `icotool` plus codec readback |
+| `linux_xdg` | freedesktop hicolor tree and `.desktop` entry | `desktop-file-validate` |
+
+Generation is supported when the MCP server runs on macOS, Linux, or Windows.
+Windows uses a handle-relative, atomic no-replace directory rename; filesystems
+or network protocols that reject that primitive fail explicitly instead of
+falling back to copy/delete or overwriting an existing path.
+
+The first release intentionally does not claim support for Apple Icon Composer
+`.icon` files, Liquid Glass annotations, Windows MSIX asset matrices, SVG,
+editor-native project mutation, signing, notarization, or direct publication to
+an app store. Android adaptive layers must be supplied semantically; the tool
+does not guess them from a flattened image.
+
+## Install from source
+
+Rust 1.88 or newer is required.
+
+On macOS or Linux:
+
+```sh
+git clone https://github.com/billlza/app-icon-toolkit.git
+cd app-icon-toolkit
+./scripts/build-local.sh
+codex plugin marketplace add "$(pwd)"
+codex plugin add app-icon-toolkit@app-icon-toolkit
+```
+
+On Windows PowerShell:
+
+```powershell
+git clone https://github.com/billlza/app-icon-toolkit.git
+Set-Location app-icon-toolkit
+./scripts/build-local.ps1
+codex plugin marketplace add (Get-Location).Path
+codex plugin add app-icon-toolkit@app-icon-toolkit
+```
+
+Release archives contain the same plugin layout with a prebuilt binary. After
+extracting an archive, add its root as the local marketplace and install the
+plugin with the same two `codex plugin` commands. Start a new task after
+installation so the host discovers the MCP tools.
+
+## MCP workflow
+
+The server exposes two tools:
+
+1. `plan_icon_set` decodes and validates every source and returns the exact
+   artifact plan without writing files.
+2. `generate_icon_set` independently replans the job, renders into sibling
+   staging, validates every generated file, and atomically publishes a new
+   output directory.
+
+Generate operations are deliberately serialized. A concurrent MCP generation
+request returns a structured `BUSY` error instead of joining an unbounded
+queue. Separate engine callers racing for the same destination are protected
+by the filesystem no-replace primitive: exactly one can publish.
+
+## Input and filesystem contract
+
+- Source and output paths are UTF-8 paths relative to an explicit workspace
+  root. Traversal, absolute paths, Windows device names, control characters,
+  and non-portable separators are rejected.
+- Inputs must be regular, single-frame PNG files no larger than 64 MiB or 4096
+  pixels per edge. The flattened master must be at least 1024×1024; Android
+  adaptive layers must be at least 432×432.
+- The output directory must not already exist. There is no overwrite, merge,
+  backup, or copy/delete fallback.
+- Files use exclusive creation inside staging, are synchronized and read back,
+  and are decoded again before publication.
+- The caller-selected workspace root is the capability boundary. Run the MCP
+  with the same filesystem privileges and workspace scope you would grant any
+  local build tool.
+- MCP stdout is reserved for protocol frames. Diagnostics go to stderr and do
+  not include source contents, environment variables, or credentials.
+
+This is ordinary local artifact generation (security level 0/1). It does not
+add signatures, encryption, or tamper-evident metadata to icon files.
+
+## Architecture
+
+```text
+app-icon-mcp ───────> app-icon-engine ───────> app-icon-domain
+       └────────────────────────────────────> app-icon-domain
+                              └─(Windows)───> app-icon-windows-fs
+```
+
+- `app-icon-domain` owns validated values, target profiles, artifact contracts,
+  and deterministic plans. It has no MCP, codec, async-runtime, or filesystem
+  dependency.
+- `app-icon-engine` owns bounded PNG decoding, four exporter modules, shared
+  render caching, validation, staging, cleanup, and transaction orchestration.
+- `app-icon-mcp` owns JSON Schema DTOs, domain conversion, tool annotations,
+  structured failures, concurrency control, and stdio transport.
+- `app-icon-windows-fs` is a private leaf adapter containing the single audited
+  Win32 FFI boundary needed for handle-relative no-replace publication. The
+  other crates continue to forbid unsafe code.
+
+There are four exporters but one MCP and one transaction. Splitting by platform
+would duplicate schemas, error mapping, process management, and concurrency
+logic while losing all-or-nothing multi-platform generation.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for dependency and error-flow details.
+
+## Quality gates
+
+Install `cargo-deny` and `cargo-about`, then run:
+
+```sh
+./scripts/check.sh
+```
+
+The gate checks formatting, Clippy with warnings denied, all tests, rustdoc with
+warnings denied, RustSec/license/source policy, generated third-party notices,
+and a locked release build. CI repeats the Rust gate on macOS, Linux, and
+Windows and separately proves Rust 1.88 compatibility on Linux and Windows.
+
+Native format checks use disposable generated fixtures:
+
+```sh
+./scripts/check-native.sh macos
+ANDROID_HOME=/path/to/android-sdk ./scripts/check-native.sh android
+./scripts/check-native.sh linux windows
+```
+
+The selected profile fails if its independent validator is unavailable. CI
+runs all four profiles on suitable hosts.
+
+## Project policies
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) describes development and review gates.
+- [SECURITY.md](SECURITY.md) defines the threat model and reporting process.
+- [CHANGELOG.md](CHANGELOG.md) records user-visible changes.
+- [THIRD_PARTY_LICENSES.html](THIRD_PARTY_LICENSES.html) contains dependency
+  license texts for binary distributions.
+
+App Icon Toolkit is licensed under the [MIT License](LICENSE).

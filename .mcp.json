@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "app-icon-toolkit": {
+      "command": "./bin/app-icon-toolkit-mcp",
+      "args": [],
+      "cwd": "."
+    }
+  }
+}

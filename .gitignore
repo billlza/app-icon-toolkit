@@ -1,0 +1,7 @@
+/target/
+/bin/app-icon-toolkit-mcp
+/bin/app-icon-toolkit-mcp.exe
+/dist/
+__pycache__/
+*.tmp
+.DS_Store

@@ -1,0 +1,31 @@
+[package]
+name = "app-icon-windows-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Internal Windows no-replace directory publication primitive"
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+cap-std.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile = "3.0"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+expect_used = "deny"
+unwrap_used = "deny"

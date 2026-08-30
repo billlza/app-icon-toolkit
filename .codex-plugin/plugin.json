@@ -1,0 +1,24 @@
+{
+  "name": "app-icon-toolkit",
+  "version": "0.1.0",
+  "description": "Plan and generate validated application icon bundles for macOS, Android, Windows, and Linux.",
+  "author": {
+    "name": "App Icon Toolkit maintainers"
+  },
+  "license": "MIT",
+  "keywords": ["icons", "macos", "android", "windows", "linux"],
+  "interface": {
+    "displayName": "App Icon Toolkit",
+    "shortDescription": "Generate cross-platform application icon bundles.",
+    "longDescription": "Plan and atomically generate validated PNG-based icon bundles for macOS app icon sets, Android launcher resources, Windows ICO files, and Linux desktop environments.",
+    "developerName": "App Icon Toolkit maintainers",
+    "category": "Developer Tools",
+    "capabilities": ["Write"],
+    "defaultPrompt": [
+      "Plan icon assets for my application.",
+      "Generate macOS, Android, Windows, and Linux icons.",
+      "Explain why my icon source cannot satisfy a target profile."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
