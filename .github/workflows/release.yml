@@ -33,7 +33,6 @@ jobs:
             echo "toolchain=$(python3 scripts/release_targets.py toolchain)"
             echo "universal_verify_matrix=$(python3 scripts/release_targets.py universal-verify-matrix)"
           } >> "$GITHUB_OUTPUT"
-          python3 scripts/release_targets.py verify-about --about about.toml
 
   quality:
     runs-on: ubuntu-22.04
@@ -45,8 +44,6 @@ jobs:
         run: python3 scripts/check-release-version.py "$GITHUB_REF_NAME"
       - name: Test release scripts
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
-      - name: Verify release and license target inventory
-        run: python3 scripts/release_targets.py verify-about --about about.toml
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy

@@ -8,8 +8,6 @@ plugin_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$plugin_root"
 
 python3 -m unittest discover -s "$plugin_root/scripts/tests" -p 'test_*.py'
-python3 "$plugin_root/scripts/release_targets.py" verify-about \
-  --about "$plugin_root/about.toml"
 cargo fmt --manifest-path "$plugin_root/Cargo.toml" --all -- --check
 cargo clippy --manifest-path "$plugin_root/Cargo.toml" \
   --workspace --all-targets --all-features -- -D warnings

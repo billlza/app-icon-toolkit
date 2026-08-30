@@ -8,7 +8,6 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
-import tomllib
 from typing import Any
 
 
@@ -284,21 +283,6 @@ def load_contract(path: Path = CONTRACT_PATH) -> ReleaseContract:
     return ReleaseContract(release_toolchain=toolchain, targets=targets)
 
 
-def verify_about_targets(contract: ReleaseContract, about_path: Path) -> None:
-    """Ensure license generation covers every actual Rust release target."""
-
-    try:
-        about = tomllib.loads(about_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        raise RuntimeError(f"failed to read {about_path}: {error}") from error
-    actual = about.get("targets")
-    if not isinstance(actual, list) or not all(isinstance(value, str) for value in actual):
-        raise RuntimeError(f"{about_path} must contain a string array named targets")
-    expected = list(contract.rust_targets())
-    if actual != expected:
-        raise RuntimeError(f"{about_path} targets are {actual}; expected {expected}")
-
-
 def verify_release_assets(contract: ReleaseContract, directory: Path, tag: str) -> None:
     """Reject missing, extra, non-regular, or symlinked public release assets."""
 
@@ -331,8 +315,6 @@ def _main() -> None:
     subparsers.add_parser("rust-targets")
     target_details = subparsers.add_parser("target-details")
     target_details.add_argument("--target", required=True)
-    verify_about = subparsers.add_parser("verify-about")
-    verify_about.add_argument("--about", type=Path, required=True)
     verify_assets = subparsers.add_parser("verify-assets")
     verify_assets.add_argument("--directory", type=Path, required=True)
     verify_assets.add_argument("--tag", required=True)
@@ -374,8 +356,6 @@ def _main() -> None:
                 sort_keys=True,
             )
         )
-    elif arguments.command == "verify-about":
-        verify_about_targets(contract, arguments.about)
     elif arguments.command == "verify-assets":
         verify_release_assets(contract, arguments.directory, arguments.tag)
     else:

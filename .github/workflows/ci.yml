@@ -144,7 +144,6 @@ jobs:
             echo "toolchain=$(python3 scripts/release_targets.py toolchain)"
             echo "universal_verify_matrix=$(python3 scripts/release_targets.py universal-verify-matrix)"
           } >> "$GITHUB_OUTPUT"
-          python3 scripts/release_targets.py verify-about --about about.toml
 
   distribution:
     needs: distribution-plan

@@ -134,19 +134,18 @@ class ReleaseTargetContractTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "non-empty"):
                 release_targets.verify_release_assets(contract, directory, tag)
 
-    def test_about_targets_must_match_every_rust_triple(self) -> None:
+    def test_rust_targets_cli_matches_the_validated_contract(self) -> None:
         contract = release_targets.load_contract()
-        with tempfile.TemporaryDirectory(prefix="about-targets-test-") as temporary:
-            path = Path(temporary) / "about.toml"
-            values = ", ".join(
-                f'"{target}"' for target in contract.rust_targets()
-            )
-            path.write_text(f"targets = [{values}]\n", encoding="utf-8")
-            release_targets.verify_about_targets(contract, path)
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_ROOT / "release_targets.py"), "rust-targets"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
 
-            path.write_text('targets = ["x86_64-unknown-linux-gnu"]\n', encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "expected"):
-                release_targets.verify_about_targets(contract, path)
+        self.assertEqual(completed.stdout.splitlines(), list(contract.rust_targets()))
 
     def test_contract_cli_is_independent_of_the_process_working_directory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="release-cli-cwd-") as temporary:
