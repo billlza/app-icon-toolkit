@@ -505,6 +505,7 @@ class ReleaseTargetContractTests(unittest.TestCase):
                 "include": [
                     {
                         "id": "universal2-apple-darwin",
+                        "artifact_name": "app-icon-toolkit-universal2-apple-darwin",
                         "runner": "macos-26-intel",
                         "archive_format": "zip",
                         "binary_name": "app-icon-toolkit-mcp",

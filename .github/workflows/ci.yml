@@ -280,7 +280,7 @@ jobs:
       - name: Upload distribution archive for independent verification
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: app-icon-toolkit-${{ matrix.id }}-attempt-${{ github.run_attempt }}
+          name: ${{ matrix.artifact_name }}-attempt-${{ github.run_attempt }}
           path: dist/*
           if-no-files-found: error
           retention-days: 1
@@ -308,7 +308,7 @@ jobs:
           mkdir release-assets
           gh run download "$GITHUB_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "app-icon-toolkit-${{ matrix.id }}-attempt-${GITHUB_RUN_ATTEMPT}" \
+            --name "${{ matrix.artifact_name }}-attempt-${GITHUB_RUN_ATTEMPT}" \
             --dir release-assets
       - name: Install pinned Codex host
         shell: bash
@@ -352,7 +352,7 @@ jobs:
           mkdir release-assets
           gh run download "$GITHUB_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "app-icon-toolkit-${{ matrix.id }}-attempt-${GITHUB_RUN_ATTEMPT}" \
+            --name "${{ matrix.artifact_name }}-attempt-${GITHUB_RUN_ATTEMPT}" \
             --dir release-assets
       - name: Verify and smoke-test the same archive on Intel macOS
         shell: bash

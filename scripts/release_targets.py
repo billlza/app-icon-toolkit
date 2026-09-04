@@ -480,6 +480,7 @@ def _main() -> None:
         entries = [
             {
                 "id": target.id,
+                "artifact_name": target.artifact_name,
                 "runner": target.native_verify_runner,
                 "archive_format": target.archive_format,
                 "binary_name": target.binary_name,

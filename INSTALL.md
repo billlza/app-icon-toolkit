@@ -170,7 +170,7 @@ use a release archive.
 
 ## Platform trust and managed computers
 
-macOS release binaries starting with v0.2.3 are signed with the project's
+macOS release binaries starting with v0.2.4 are signed with the project's
 Developer ID identity and accepted by Apple's notarization service. The public
 ZIP is the exact notarized submission, but a ZIP and a standalone command-line
 binary cannot carry a stapled ticket like an application bundle or installer.

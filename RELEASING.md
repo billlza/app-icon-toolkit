@@ -1,6 +1,6 @@
 # Release process
 
-This is the release runbook for v0.2.3 and later. A release passes through four
+This is the release runbook for v0.2.4 and later. A release passes through four
 separate trust domains. Do not collapse them into one “release succeeded”
 claim:
 
@@ -34,7 +34,7 @@ finish with no errors or warnings:
 ```
 
 Confirm that `CHANGELOG.md`, `.codex-plugin/plugin.json`, every Cargo workspace
-package, `Cargo.lock`, and the planned tag all identify v0.2.3. Treat
+package, `Cargo.lock`, and the planned tag all identify v0.2.4. Treat
 `scripts/release-targets.json` as the only release target inventory.
 
 GitHub immutable releases must already be enabled for the repository before
@@ -63,7 +63,7 @@ release happens to be newest:
 ```bash
 RELEASE_CHECKOUT='/absolute/path/to/the/clean/tagged/checkout'
 RELEASE_REPOSITORY='<owner>/<repository>'
-RELEASE_TAG='v0.2.3'
+RELEASE_TAG='v0.2.4'
 RELEASE_HEAD_SHA='<40-character-lowercase-tagged-commit-sha>'
 IDENTITY_SHA1='<40-character-uppercase-developer-id-fingerprint>'
 NOTARY_PROFILE='<existing-keychain-profile-name>'
@@ -75,6 +75,9 @@ The signing Mac must never execute a downloaded candidate. Its finalizer uses
 only static architecture, signature, package, and notarization-ticket checks.
 Actual MCP execution of signed Draft binaries belongs only to the
 credential-isolated hosted validation jobs.
+
+The annotated `v0.2.3` tag records a failed, unpublished workflow attempt. Do
+not delete, move, reuse, or finalize that tag or any artifact from its run.
 
 ## 1. Freeze the annotated tag and source workflow attempt
 
