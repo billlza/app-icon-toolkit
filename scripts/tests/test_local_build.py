@@ -166,7 +166,10 @@ esac
                         continue
 
                     isolated_target = Path(cargo_log.read_text(encoding="utf-8"))
-                    self.assertEqual(isolated_target.parent, plugin_root / "target")
+                    self.assertEqual(
+                        isolated_target.parent.resolve(),
+                        (plugin_root / "target").resolve(),
+                    )
                     self.assertTrue(isolated_target.name.startswith("build-local"))
                     self.assertFalse(isolated_target.exists())
                     self.assertEqual(
