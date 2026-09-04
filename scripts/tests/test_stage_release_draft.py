@@ -208,7 +208,7 @@ class DraftStagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="release-notes-test-") as temporary:
             root = Path(temporary)
             notes = root / "notes"
-            notes.write_text(NOTES, encoding="utf-8")
+            notes.write_bytes(NOTES.encode("utf-8"))
             self.assertEqual(release_notes.read_release_notes(notes), NOTES)
 
             invalid = root / "invalid"

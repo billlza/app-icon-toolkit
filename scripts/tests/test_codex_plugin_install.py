@@ -147,7 +147,10 @@ class CodexPluginInstallTests(unittest.TestCase):
     def test_codex_executable_is_resolved_before_working_directory_changes(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory(prefix="codex-executable-test-") as temporary:
+        with tempfile.TemporaryDirectory(
+            prefix="codex-executable-test-",
+            dir=Path.cwd(),
+        ) as temporary:
             executable = Path(temporary) / "bin" / "codex"
             executable.parent.mkdir()
             executable.write_bytes(b"executable")

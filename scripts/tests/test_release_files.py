@@ -113,6 +113,43 @@ class ReleaseFileTests(unittest.TestCase):
 
             self.assertIs(raised.exception.__cause__, sentinel)
 
+    def test_windows_stable_open_compares_path_and_handle_snapshots_separately(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-file-windows-stat-") as temporary:
+            source = Path(temporary) / "source"
+            source.write_bytes(b"payload")
+            named = os.lstat(source)
+            opened = mock.Mock(
+                st_mode=named.st_mode,
+                st_ino=named.st_ino + 1,
+                st_dev=named.st_dev + 1,
+                st_nlink=named.st_nlink,
+                st_size=named.st_size,
+                st_mtime_ns=named.st_mtime_ns,
+                st_ctime_ns=named.st_ctime_ns,
+            )
+
+            with mock.patch.object(
+                release_files,
+                "_WINDOWS",
+                True,
+            ), mock.patch.object(
+                release_files.os,
+                "fstat",
+                return_value=opened,
+            ):
+                with release_files.open_stable_regular_file(
+                    source,
+                    label="test source",
+                    require_single_link=True,
+                ) as (input_file, snapshot):
+                    self.assertEqual(input_file.read(), b"payload")
+                    self.assertEqual(
+                        snapshot,
+                        release_files.FileSnapshot.from_stat(named),
+                    )
+
     @unittest.skipUnless(
         os.name == "nt",
         "Windows-specific open-file replacement semantics",

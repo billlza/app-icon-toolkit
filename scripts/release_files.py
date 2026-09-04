@@ -12,6 +12,7 @@ from typing import BinaryIO, Iterator
 
 
 COPY_BUFFER_BYTES = 1024 * 1024
+_WINDOWS = os.name == "nt"
 
 
 class ReleaseFileError(RuntimeError):
@@ -84,17 +85,34 @@ def inspect_regular_file(
         metadata = os.lstat(absolute)
     except OSError as error:
         raise ReleaseFileError(f"failed to inspect {label} {absolute}: {error}") from error
+    return _validated_regular_snapshot(
+        metadata,
+        absolute,
+        label=label,
+        require_single_link=require_single_link,
+        require_nonempty=require_nonempty,
+    )
+
+
+def _validated_regular_snapshot(
+    metadata: os.stat_result,
+    path: Path,
+    *,
+    label: str,
+    require_single_link: bool,
+    require_nonempty: bool,
+) -> FileSnapshot:
     if not stat.S_ISREG(metadata.st_mode):
         raise ReleaseFileError(
-            f"{label} must be an ordinary non-symlink file: {absolute}"
+            f"{label} must be an ordinary non-symlink file: {path}"
         )
     if require_single_link and metadata.st_nlink != 1:
         raise ReleaseFileError(
             f"{label} must have exactly one hard link, found "
-            f"{metadata.st_nlink}: {absolute}"
+            f"{metadata.st_nlink}: {path}"
         )
     if require_nonempty and metadata.st_size <= 0:
-        raise ReleaseFileError(f"{label} must be non-empty: {absolute}")
+        raise ReleaseFileError(f"{label} must be non-empty: {path}")
     return FileSnapshot.from_stat(metadata)
 
 
@@ -135,9 +153,35 @@ def open_stable_regular_file(
         os.close(descriptor)
         raise
     try:
-        opened_snapshot = FileSnapshot.from_stat(os.fstat(opened.fileno()))
-        if opened_snapshot != named_before:
-            raise ReleaseFileError(f"{label} changed while it was being opened: {absolute}")
+        opened_snapshot = _validated_regular_snapshot(
+            os.fstat(opened.fileno()),
+            absolute,
+            label=f"opened {label}",
+            require_single_link=require_single_link,
+            require_nonempty=require_nonempty,
+        )
+        if _WINDOWS:
+            named_opened = inspect_regular_file(
+                absolute,
+                label=label,
+                require_single_link=require_single_link,
+                require_nonempty=require_nonempty,
+            )
+            if named_opened != named_before:
+                raise ReleaseFileError(
+                    f"{label} path changed while it was being opened: {absolute}"
+                )
+            if opened_snapshot.size != named_opened.size:
+                raise ReleaseFileError(
+                    f"{label} size changed while it was being opened: {absolute}"
+                )
+            consumer_snapshot = named_opened
+        else:
+            if opened_snapshot != named_before:
+                raise ReleaseFileError(
+                    f"{label} changed while it was being opened: {absolute}"
+                )
+            consumer_snapshot = opened_snapshot
     except BaseException:
         opened.close()
         raise
@@ -147,7 +191,7 @@ def open_stable_regular_file(
     stability_issues: list[tuple[str, BaseException | None]] = []
     try:
         try:
-            yield opened, opened_snapshot
+            yield opened, consumer_snapshot
         except BaseException as error:
             consumer_error = error
             consumer_traceback = error.__traceback__
@@ -177,7 +221,7 @@ def open_stable_regular_file(
             require_single_link=require_single_link,
             require_nonempty=require_nonempty,
         )
-        if named_after != opened_snapshot:
+        if named_after != named_before:
             stability_issues.append(
                 (f"{label} path changed while it was being read: {absolute}", None)
             )
