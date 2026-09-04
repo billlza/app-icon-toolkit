@@ -53,6 +53,80 @@ class ReleaseFileTests(unittest.TestCase):
                     label="test asset set",
                 )
 
+    def test_exact_regular_file_set_uses_named_path_link_count(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-file-set-links-") as temporary:
+            directory = Path(temporary)
+            path = directory / "one.zip"
+            path.write_bytes(b"one")
+            metadata = os.lstat(path)
+            entry = mock.Mock()
+            entry.name = path.name
+            entry.stat.return_value = SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_size=metadata.st_size,
+                st_nlink=0,
+            )
+            scanned = mock.MagicMock()
+            scanned.__enter__.return_value = iter((entry,))
+
+            with mock.patch.object(
+                release_files.os,
+                "scandir",
+                return_value=scanned,
+            ):
+                release_files.verify_exact_regular_file_set(
+                    directory,
+                    (path.name,),
+                    label="test asset set",
+                )
+
+            entry.stat.assert_called_once_with(follow_symlinks=False)
+
+    def test_windows_style_directory_metadata_cannot_hide_a_hardlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-file-set-hardlink-") as temporary:
+            directory = Path(temporary)
+            source = directory / "source.zip"
+            source.write_bytes(b"source")
+            candidate = directory / "candidate.zip"
+            os.link(source, candidate)
+            entries = []
+            for path in (source, candidate):
+                metadata = os.lstat(path)
+                entry = mock.Mock()
+                entry.name = path.name
+                entry.stat.return_value = SimpleNamespace(
+                    st_mode=metadata.st_mode,
+                    st_size=metadata.st_size,
+                    st_nlink=0,
+                )
+                entries.append(entry)
+            scanned = mock.MagicMock()
+            scanned.__enter__.return_value = iter(entries)
+
+            with mock.patch.object(
+                release_files,
+                "_WINDOWS",
+                True,
+            ), mock.patch.object(
+                release_files.os,
+                "scandir",
+                return_value=scanned,
+            ), self.assertRaisesRegex(
+                release_files.ReleaseFileError,
+                "non-empty regular non-symlink single-link",
+            ) as raised:
+                release_files.verify_exact_regular_file_set(
+                    directory,
+                    (source.name, candidate.name),
+                    label="test asset set",
+                )
+
+            self.assertIsInstance(
+                raised.exception.__cause__,
+                release_files.ReleaseFileError,
+            )
+            self.assertIn("found 2", str(raised.exception.__cause__))
+
     def test_exact_regular_file_set_rejects_directory_replacement(self) -> None:
         with tempfile.TemporaryDirectory(prefix="release-file-set-swap-") as temporary:
             root = Path(temporary)

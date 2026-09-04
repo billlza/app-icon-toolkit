@@ -169,6 +169,40 @@ def verify_exact_regular_file_set(
         raise
     except OSError as error:
         raise ReleaseFileError(f"cannot scan {label} directory {absolute}: {error}") from error
+    expected = set(names)
+    actual = set(entries)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ReleaseFileError(
+            f"{label} mismatch; missing={missing}; extra={extra}"
+        )
+    invalid = sorted(
+        name
+        for name, metadata in entries.items()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+        )
+    )
+    if invalid:
+        raise ReleaseFileError(
+            f"{label} entries must be non-empty regular non-symlink single-link files: "
+            f"{invalid}"
+        )
+    for name in sorted(expected):
+        try:
+            inspect_regular_file(
+                absolute / name,
+                label=f"{label} entry {name!r}",
+                require_single_link=True,
+            )
+        except ReleaseFileError as error:
+            raise ReleaseFileError(
+                f"{label} entries must be non-empty regular non-symlink single-link "
+                f"files: [{name!r}]"
+            ) from error
+
     try:
         directory_after = os.lstat(absolute)
     except OSError as error:
@@ -196,29 +230,6 @@ def verify_exact_regular_file_set(
     ):
         raise ReleaseFileError(
             f"{label} directory changed while it was scanned: {absolute}"
-        )
-
-    expected = set(names)
-    actual = set(entries)
-    if actual != expected:
-        missing = sorted(expected - actual)
-        extra = sorted(actual - expected)
-        raise ReleaseFileError(
-            f"{label} mismatch; missing={missing}; extra={extra}"
-        )
-    invalid = sorted(
-        name
-        for name, metadata in entries.items()
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_size <= 0
-            or metadata.st_nlink != 1
-        )
-    )
-    if invalid:
-        raise ReleaseFileError(
-            f"{label} entries must be non-empty regular non-symlink single-link files: "
-            f"{invalid}"
         )
 
 
