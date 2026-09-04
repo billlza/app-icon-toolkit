@@ -16,15 +16,15 @@ from release_test_support import smoke_installed_plugin
 class PackagedCommandResolutionTests(unittest.TestCase):
     def test_server_identity_must_match_the_plugin_manifest(self) -> None:
         smoke_installed_plugin.validate_server_identity(
-            {"name": "app-icon-toolkit", "version": "0.2.6"},
+            {"name": "app-icon-toolkit", "version": "0.2.7"},
             "app-icon-toolkit",
-            "0.2.6",
+            "0.2.7",
         )
         with self.assertRaisesRegex(RuntimeError, "server identity"):
             smoke_installed_plugin.validate_server_identity(
                 {"name": "app-icon-toolkit", "version": "0.2.2"},
                 "app-icon-toolkit",
-                "0.2.6",
+                "0.2.7",
             )
 
     def test_resolves_from_plugin_cwd_instead_of_parent_process_cwd(self) -> None:

@@ -185,6 +185,26 @@ class HostedValidationContractTests(unittest.TestCase):
                 contract=self.contract,
             )
 
+    def test_result_parser_rejects_noncanonical_architectures(self) -> None:
+        spec = next(
+            item
+            for item in self.plan.validations
+            if item.target_id == "universal2-apple-darwin"
+        )
+        value = asdict(self.result(spec))
+
+        value["architectures"] = ["x86_64", "arm64"]
+        with self.assertRaisesRegex(hosted.HostedValidationError, "unique and sorted"):
+            hosted.parse_validation_result(
+                hosted.canonical_json(value),
+            )
+
+        value["architectures"] = ["arm64", "arm64"]
+        with self.assertRaisesRegex(hosted.HostedValidationError, "unique and sorted"):
+            hosted.parse_validation_result(
+                hosted.canonical_json(value),
+            )
+
     def test_exact_draft_binding_rejects_replaced_numeric_asset_identity(self) -> None:
         receipt = hosted.create_bound_receipt(
             self.plan,

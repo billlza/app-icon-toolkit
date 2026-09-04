@@ -478,7 +478,7 @@ def validate_target(
             identity_sha1=signature.identity_sha1,
             identifier=signature.identifier,
             team_id=signature.team_id,
-            architectures=signature.architectures,
+            architectures=tuple(sorted(signature.architectures)),
             signature_valid=True,
             notarization_ticket_valid=True,
             mcp_smoke_valid=True,
