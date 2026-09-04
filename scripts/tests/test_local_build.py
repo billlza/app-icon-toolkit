@@ -31,6 +31,11 @@ switch ($env:FAKE_CARGO_ARTIFACT) {
     "missing" {}
     "empty" { [IO.File]::WriteAllBytes($binary, [byte[]]@()) }
     "directory" { New-Item -ItemType Directory -Path $binary | Out-Null }
+    "hardlink" {
+        $linkTarget = Join-Path $releaseDirectory "link-target.exe"
+        [IO.File]::WriteAllText($linkTarget, "fresh-build")
+        New-Item -ItemType HardLink -Path $binary -Target $linkTarget | Out-Null
+    }
     default {
         [IO.File]::WriteAllText(
             $binary,
@@ -71,6 +76,10 @@ case "${FAKE_CARGO_ARTIFACT:-normal}" in
   missing) ;;
   empty) : > "$binary" ;;
   directory) mkdir "$binary" ;;
+  hardlink)
+    printf '%s' 'fresh-build' > "$release_directory/link-target"
+    ln "$release_directory/link-target" "$binary"
+    ;;
   symlink)
     printf '%s' 'link-target' > "$release_directory/link-target"
     ln -s link-target "$binary"
@@ -90,6 +99,7 @@ esac
             ("missing artifact", None, False, "missing", False),
             ("empty artifact", None, False, "empty", False),
             ("directory artifact", None, False, "directory", False),
+            ("hardlink artifact", None, False, "hardlink", True),
         ]
         if os.name != "nt":
             cases.append(("symlink artifact", None, False, "symlink", False))

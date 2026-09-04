@@ -34,7 +34,6 @@ try {
     if (
         $releaseItem.PSIsContainer -or
         $releaseItem.Length -le 0 -or
-        $null -ne $releaseItem.LinkType -or
         $isReparsePoint
     ) {
         throw "Cargo did not produce a regular local plugin binary: $releaseBinary"
