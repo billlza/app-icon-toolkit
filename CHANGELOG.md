@@ -3,6 +3,19 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.2.7 - 2026-09-05
+
+### Fixed
+
+- Canonicalize observed Universal2 architecture order at the hosted validation
+  result boundary while retaining strict duplicate, missing, extra, and unknown
+  architecture rejection.
+- Cover the native `lipo` architecture order in the hosted result round trip so
+  receipt aggregation remains compatible with the existing canonical schema.
+- Preserve the failed, unpublished v0.2.6 Draft, signed assets, workflow runs,
+  and local receipts while starting v0.2.7 from a new commit, tag, workflow
+  run, artifact set, and local attempt root.
+
 ## 0.2.6 - 2026-09-05
 
 ### Fixed

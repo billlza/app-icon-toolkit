@@ -35,7 +35,7 @@ finish with no errors or warnings:
 ```
 
 Confirm that `CHANGELOG.md`, `.codex-plugin/plugin.json`, every Cargo workspace
-package, `Cargo.lock`, and the planned tag all identify v0.2.6. Treat
+package, `Cargo.lock`, and the planned tag all identify v0.2.7. Treat
 `scripts/release-targets.json` as the only release target inventory.
 
 GitHub immutable releases must already be enabled for the repository before
@@ -64,7 +64,7 @@ release happens to be newest:
 ```bash
 RELEASE_CHECKOUT='/absolute/path/to/the/clean/tagged/checkout'
 RELEASE_REPOSITORY='<owner>/<repository>'
-RELEASE_TAG='v0.2.6'
+RELEASE_TAG='v0.2.7'
 RELEASE_HEAD_SHA='<40-character-lowercase-tagged-commit-sha>'
 IDENTITY_SHA1='<40-character-uppercase-developer-id-fingerprint>'
 NOTARY_PROFILE='<existing-keychain-profile-name>'
@@ -92,6 +92,13 @@ read-only GitHub Actions installation token cannot inspect an unpublished
 release. Preserve its tag, populated Draft, workflow runs, artifacts, local
 receipts, and notarization jobs. Do not delete, move, reuse, publish, or
 finalize any part of that attempt.
+
+The annotated `v0.2.6` tag records a fourth unpublished attempt. Its signed
+assets passed native Apple silicon and Intel validation, but hosted receipt
+aggregation rejected the non-canonical Universal2 architecture order. Preserve
+its tag, populated Draft, workflow runs, artifacts, local receipts, and
+notarization jobs. Do not delete, move, reuse, publish, or finalize any part of
+that attempt.
 
 ## 1. Freeze the annotated tag and source workflow attempt
 

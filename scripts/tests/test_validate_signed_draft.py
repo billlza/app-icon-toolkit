@@ -232,7 +232,8 @@ class ValidateSignedDraftTests(unittest.TestCase):
         spec = next(
             item
             for item in self.plan.validations
-            if item.target_id == "aarch64-apple-darwin"
+            if item.target_id == "universal2-apple-darwin"
+            and item.runtime_architecture == "arm64"
         )
         with tempfile.TemporaryDirectory(prefix="hosted-target-") as temporary:
             root = Path(temporary)
@@ -250,7 +251,7 @@ class ValidateSignedDraftTests(unittest.TestCase):
                 identity_sha1=IDENTITY,
                 identifier=self.contract.macos_signing.code_identifier,
                 team_id=self.contract.macos_signing.team_id,
-                architectures=spec.expected_architectures,
+                architectures=tuple(reversed(spec.expected_architectures)),
                 slices=(),
             )
 
@@ -292,6 +293,13 @@ class ValidateSignedDraftTests(unittest.TestCase):
 
             self.assertTrue(result.mcp_smoke_valid)
             self.assertEqual(result.binary_sha256, binary_digest)
+            self.assertEqual(result.architectures, spec.expected_architectures)
+            self.assertEqual(
+                hosted.parse_validation_result(
+                    hosted.canonical_json(asdict(result)),
+                ),
+                result,
+            )
             verify.assert_called_once()
             ticket.assert_called_once()
             self.assertEqual(run.call_count, 2)
