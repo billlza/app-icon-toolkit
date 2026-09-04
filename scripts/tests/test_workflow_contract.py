@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
+import subprocess
+import sys
 import unittest
 
 
@@ -13,6 +16,16 @@ WORKFLOW_PATHS = (
 )
 JOB_HEADER = re.compile(r"^  ([a-zA-Z0-9_-]+):$", re.MULTILINE)
 PINNED_ACTION = re.compile(r"^\s*- uses: ([^@\s]+)@([^\s]+)", re.MULTILINE)
+MATRIX_OUTPUT = re.compile(
+    r"matrix: \$\{\{ fromJSON\(needs\.[a-zA-Z0-9_-]+\.outputs\."
+    r"([a-zA-Z0-9_]+)\) \}\}"
+)
+MATRIX_FIELD = re.compile(r"\bmatrix\.([a-zA-Z_][a-zA-Z0-9_]*)\b")
+MATRIX_BRACKET = re.compile(r"\bmatrix\s*\[")
+TARGET_OUTPUT_COMMAND = re.compile(
+    r'echo "([a-zA-Z0-9_]+)=\$\(python3 scripts/release_targets\.py '
+    r'([a-z0-9-]+)\)"'
+)
 
 
 def workflow_text(relative: Path) -> str:
@@ -156,18 +169,114 @@ class WorkflowContractTests(unittest.TestCase):
 
         ci_workflow = workflow_text(Path(".github/workflows/ci.yml"))
         ci_upload_name = (
-            "app-icon-toolkit-${{ matrix.id }}-attempt-${{ github.run_attempt }}"
+            "${{ matrix.artifact_name }}-attempt-${{ github.run_attempt }}"
         )
         ci_download_name = (
-            "app-icon-toolkit-${{ matrix.id }}-attempt-${GITHUB_RUN_ATTEMPT}"
+            "${{ matrix.artifact_name }}-attempt-${GITHUB_RUN_ATTEMPT}"
         )
         self.assertEqual(ci_workflow.count(f"name: {ci_upload_name}"), 1)
         self.assertEqual(ci_workflow.count(f'--name "{ci_download_name}"'), 2)
-        self.assertNotIn("name: app-icon-toolkit-${{ matrix.id }}\n", ci_workflow)
+        self.assertNotIn(
+            "app-icon-toolkit-${{ matrix.id }}-attempt-",
+            ci_workflow,
+        )
         self.assertNotIn(
             '--name "app-icon-toolkit-${{ matrix.id }}"',
             ci_workflow,
         )
+
+    def test_generated_matrices_cover_every_workflow_consumer_field(self) -> None:
+        commands = {
+            "matrix": "matrix",
+            "codex_install_matrix": "codex-install-matrix",
+            "universal_verify_matrix": "universal-verify-matrix",
+        }
+        expected_consumers = {
+            (".github/workflows/ci.yml", "distribution", "matrix"),
+            (
+                ".github/workflows/ci.yml",
+                "distribution-codex-install",
+                "codex_install_matrix",
+            ),
+            (
+                ".github/workflows/ci.yml",
+                "distribution-universal-intel",
+                "universal_verify_matrix",
+            ),
+            (".github/workflows/release.yml", "build-assets", "matrix"),
+            (
+                ".github/workflows/release.yml",
+                "verify-codex-install",
+                "codex_install_matrix",
+            ),
+            (
+                ".github/workflows/release.yml",
+                "verify-universal-intel",
+                "universal_verify_matrix",
+            ),
+        }
+        observed_consumers: set[tuple[str, str, str]] = set()
+        generated: dict[str, list[dict[str, object]]] = {}
+
+        for relative in (
+            Path(".github/workflows/ci.yml"),
+            Path(".github/workflows/release.yml"),
+        ):
+            workflow = workflow_text(relative)
+            produced = TARGET_OUTPUT_COMMAND.findall(workflow)
+            self.assertEqual(len(produced), len(dict(produced)))
+            producer_commands = dict(produced)
+            self.assertEqual(
+                {name: producer_commands.get(name) for name in commands},
+                commands,
+            )
+            blocks = job_blocks(workflow)
+            for job_name, block in blocks.items():
+                outputs = MATRIX_OUTPUT.findall(block)
+                if not outputs:
+                    continue
+                self.assertEqual(len(outputs), 1)
+                output = outputs[0]
+                self.assertIn(output, producer_commands)
+                observed_consumers.add((relative.as_posix(), job_name, output))
+                command = producer_commands[output]
+
+                if command not in generated:
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(REPOSITORY_ROOT / "scripts" / "release_targets.py"),
+                            command,
+                        ],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        timeout=10,
+                    )
+                    self.assertEqual(completed.stderr, "")
+                    value = json.loads(completed.stdout)
+                    self.assertEqual(set(value), {"include"})
+                    entries = value["include"]
+                    self.assertIsInstance(entries, list)
+                    self.assertTrue(entries)
+                    self.assertTrue(all(isinstance(entry, dict) for entry in entries))
+                    generated[command] = entries
+
+                referenced_fields = set(MATRIX_FIELD.findall(block))
+                self.assertTrue(referenced_fields)
+                self.assertNotRegex(block, MATRIX_BRACKET)
+                for index, entry in enumerate(generated[command]):
+                    missing = referenced_fields - set(entry)
+                    self.assertFalse(
+                        missing,
+                        f"{relative.as_posix()}:{job_name} <- {command} "
+                        f"entry[{index}] missing {sorted(missing)}",
+                    )
+
+        self.assertEqual(observed_consumers, expected_consumers)
+        self.assertEqual(set(generated), set(commands.values()))
 
     def test_signed_draft_validation_is_secret_free_and_attempt_bound(self) -> None:
         workflow = (

@@ -25,7 +25,7 @@ class DocumentationContractTests(unittest.TestCase):
         )
         readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
         install = (REPOSITORY_ROOT / "INSTALL.md").read_text(encoding="utf-8")
-        self.assertIn("v0.2.3 and later use Developer ID signing", readme)
+        self.assertIn("v0.2.4 and later use Developer ID signing", readme)
         self.assertIn("ditto -x -k", install)
         self.assertIn("cannot carry a stapled ticket", install)
         self.assertNotIn(
@@ -69,7 +69,7 @@ class DocumentationContractTests(unittest.TestCase):
             "Delete the old extracted directory only after", normalized
         )
 
-    def test_release_runbook_matches_the_staged_v023_flow(self) -> None:
+    def test_release_runbook_matches_the_staged_release_flow(self) -> None:
         releasing = (REPOSITORY_ROOT / "RELEASING.md").read_text(encoding="utf-8")
         normalized = " ".join(releasing.split())
 

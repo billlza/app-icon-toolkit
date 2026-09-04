@@ -3,6 +3,16 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.2.4 - 2026-09-04
+
+### Fixed
+
+- Carry the canonical artifact name in the Universal2 verification matrix and
+  validate every generated release-target field consumed by the CI and Release
+  workflows.
+- Preserve the failed, unpublished v0.2.3 attempt while starting v0.2.4 from a
+  new commit, tag, workflow run, and artifact set.
+
 ## 0.2.3 - 2026-09-04
 
 ### Added
