@@ -109,8 +109,12 @@ read-only reconciliation and is never retried as an ordinary failure.
 
 Downloaded candidates are treated as potentially hostile on the signing host.
 Static Mach-O, signature, and notarization tools may inspect them, but the
-signing process never starts a candidate executable. Signed runtime tests run
-on credential-isolated hosted macOS workers with read-only repository access.
+signing process never starts a candidate executable. GitHub's push-equivalent
+Draft visibility is confined to hosted metadata, byte-fetch, and refresh jobs
+that never extract or execute candidates and never persist credentials. Exact
+size- and digest-verified bytes cross into separate hosted macOS workers whose
+repository token remains read-only; candidate processes receive only a minimal
+environment with no GitHub token.
 The final release must be immutable, and its numeric release metadata and asset
 bytes are re-downloaded without GitHub credentials before completion is
 recorded. SHA-256 in this release pipeline binds exact bytes and detects

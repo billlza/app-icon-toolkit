@@ -170,7 +170,7 @@ use a release archive.
 
 ## Platform trust and managed computers
 
-macOS release binaries starting with v0.2.5 are signed with the project's
+macOS release binaries starting with v0.2.6 are signed with the project's
 Developer ID identity and accepted by Apple's notarization service. The public
 ZIP is the exact notarized submission, but a ZIP and a standalone command-line
 binary cannot carry a stapled ticket like an application bundle or installer.
@@ -178,7 +178,7 @@ The first Gatekeeper verification therefore requires network access to Apple's
 notarization service. Do not remove quarantine attributes or bypass Gatekeeper
 to work around a failed verification; confirm the archive checksum and obtain a
 fresh release download instead. v0.2.2 and earlier macOS binaries were unsigned;
-v0.2.3 and v0.2.4 were not published.
+v0.2.3 through v0.2.5 were not published.
 
 Windows release binaries do not currently have an Authenticode signature, so
 SmartScreen, endpoint-security software, or organization policy may still block

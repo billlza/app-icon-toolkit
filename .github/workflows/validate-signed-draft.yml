@@ -50,9 +50,12 @@ jobs:
   plan:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    # GitHub exposes Draft releases only to push-capable identities. This job
+    # performs GETs against the bound Draft but never downloads or executes a
+    # candidate.
     permissions:
       actions: read
-      contents: read
+      contents: write
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
@@ -71,10 +74,41 @@ jobs:
           test "$GITHUB_REF_NAME" = "$EXPECTED_TAG"
           test "$GITHUB_SHA" = "$EXPECTED_HEAD_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
-      - id: plan
-        name: Bind source run and exact signed draft assets
+      - name: Fetch exact source workflow run
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run view "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,workflowDatabaseId,attempt,headBranch,headSha,workflowName,event,status,conclusion \
+            > source-run.json
+      - name: Fetch exact signed Draft metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DATABASE_ID: ${{ inputs.release_database_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --hostname github.com \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_DATABASE_ID" \
+            > draft-release.json
+      - name: Fetch hosted validation workflow identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation_workflow_id=$(gh api --hostname github.com \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/validate-signed-draft.yml" \
+            --jq .id)
+          test "$validation_workflow_id" -gt 0
+          printf '%s\n' "$validation_workflow_id" > validation-workflow-id.txt
+      - id: plan
+        name: Bind source run and exact signed Draft assets
+        env:
           SOURCE_WORKFLOW_ID: ${{ inputs.source_workflow_id }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
@@ -86,16 +120,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh run view "$SOURCE_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json databaseId,workflowDatabaseId,attempt,headBranch,headSha,workflowName,event,status,conclusion \
-            > source-run.json
-          gh api --hostname github.com \
-            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_DATABASE_ID" \
-            > draft-release.json
-          validation_workflow_id=$(gh api --hostname github.com \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/validate-signed-draft.yml" \
-            --jq .id)
+          validation_workflow_id=$(cat validation-workflow-id.txt)
           python3 scripts/validate-signed-draft.py plan \
             --repository "$GITHUB_REPOSITORY" \
             --source-workflow-id "$SOURCE_WORKFLOW_ID" \
@@ -122,8 +147,54 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  validate:
+  fetch:
     needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    # This isolated job needs push-equivalent visibility only to GET an exact
+    # numeric Draft asset. It never extracts or executes candidate bytes.
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.head_sha }}
+          persist-credentials: false
+      - name: Download this run's exact validation plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir hosted-plan
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "signed-draft-plan-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" \
+            --dir hosted-plan
+      - name: Fetch and verify exact numeric signed Draft asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_ID: ${{ matrix.validation_id }}
+        shell: bash
+        run: >-
+          python3 scripts/validate-signed-draft.py download
+          --plan hosted-plan/hosted-validation-plan.json
+          --validation-id "$VALIDATION_ID"
+          --output-directory signed-asset
+      - name: Transfer verified bytes to the read-only validation boundary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-draft-asset-${{ matrix.validation_id }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: signed-asset/${{ matrix.archive_name }}
+          if-no-files-found: error
+          retention-days: 90
+
+  validate:
+    needs: [plan, fetch]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -148,16 +219,17 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --name "signed-draft-plan-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" \
             --dir hosted-plan
-      - name: Download exact numeric signed draft asset
+      - name: Download exact verified asset from the isolated fetch job
         env:
           GH_TOKEN: ${{ github.token }}
-          VALIDATION_ID: ${{ matrix.validation_id }}
         shell: bash
-        run: >-
-          python3 scripts/validate-signed-draft.py download
-          --plan hosted-plan/hosted-validation-plan.json
-          --validation-id "$VALIDATION_ID"
-          --output-directory signed-asset
+        run: |
+          set -euo pipefail
+          mkdir signed-asset
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "signed-draft-asset-${{ matrix.validation_id }}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" \
+            --dir signed-asset
       - name: Verify signature, ticket, architecture, and MCP runtime
         env:
           VALIDATION_ID: ${{ matrix.validation_id }}
@@ -178,8 +250,34 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  receipt:
+  refresh-draft:
     needs: [plan, validate]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    # The refresh runner performs one numeric Draft GET after every native
+    # validation succeeds. It checks out and executes no repository content.
+    permissions:
+      contents: write
+    steps:
+      - name: Refresh the exact unpublished release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DATABASE_ID: ${{ inputs.release_database_id }}
+        shell: bash
+        run: >-
+          gh api --hostname github.com
+          "repos/$GITHUB_REPOSITORY/releases/$RELEASE_DATABASE_ID"
+          > fresh-draft-release.json
+      - name: Transfer the attempt-bound Draft snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-draft-refresh-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fresh-draft-release.json
+          if-no-files-found: error
+          retention-days: 90
+
+  receipt:
+    needs: [plan, validate, refresh-draft]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
@@ -196,7 +294,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir hosted-plan hosted-results
+          mkdir hosted-plan hosted-results fresh-draft
           gh run download "$GITHUB_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --name "signed-draft-plan-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" \
@@ -208,21 +306,16 @@ jobs:
               --dir hosted-results
           done < <(python3 scripts/validate-signed-draft.py list-validation-ids \
             --plan hosted-plan/hosted-validation-plan.json)
-      - name: Refresh the exact unpublished release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_DATABASE_ID: ${{ inputs.release_database_id }}
-        shell: bash
-        run: >-
-          gh api --hostname github.com
-          "repos/$GITHUB_REPOSITORY/releases/$RELEASE_DATABASE_ID"
-          > fresh-draft-release.json
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "signed-draft-refresh-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" \
+            --dir fresh-draft
       - name: Build strict hosted validation receipt
         shell: bash
         run: >-
           python3 scripts/validate-signed-draft.py aggregate
           --plan hosted-plan/hosted-validation-plan.json
-          --fresh-release-json fresh-draft-release.json
+          --fresh-release-json fresh-draft/fresh-draft-release.json
           --results-directory hosted-results
           --output hosted-validation-receipt.json
       - name: Upload attempt-bound validation receipt

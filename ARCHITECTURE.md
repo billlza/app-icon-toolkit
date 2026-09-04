@@ -150,7 +150,7 @@ local-marketplace install and plugin-listing gate on fresh Codex hosts. A Git
 tree is a source distribution and intentionally contains no platform binary;
 it must be built before local marketplace registration.
 
-Release finalization has three credential domains. GitHub-hosted build jobs own
+Release finalization has four capability domains. GitHub-hosted build jobs own
 the portable tests and unsigned candidate artifacts; artifact names include the
 workflow attempt. The local macOS signer owns Developer ID and notarization
 Keychain access, performs only static candidate inspection, and records every
@@ -159,9 +159,13 @@ uses a private `candidate.partial` tree and promotes it only after complete
 validation and directory synchronization; persisted signing intent prevents
 automatic cleanup of possibly signed bytes. Every Draft asset POST has its own
 append-only intent, so a process interruption requires read-only reconciliation
-and explicit authorization before retry. Separate hosted macOS validation jobs
+and explicit authorization before retry. Isolated hosted Linux jobs use
+GitHub's coarse push-equivalent visibility only to read bound Draft metadata or
+assets; they never extract or execute candidates and transfer verified bytes
+through attempt-bound Actions artifacts. Separate read-only hosted macOS jobs
 receive no signing or notarization secrets and execute the signed Draft
-artifacts on both Apple silicon and Intel. The publisher consumes that exact
+artifacts on both Apple silicon and Intel. A final isolated Draft refresh is
+likewise non-executing. The publisher consumes that exact
 hosted validation receipt, publishes the already complete Draft by numeric
 release ID, and then verifies the immutable public release through the anonymous
 numeric REST representation and asset endpoints.

@@ -1,6 +1,6 @@
 # Release process
 
-This is the release runbook for v0.2.5 and later. A release passes through four
+This is the release runbook for v0.2.6 and later. A release passes through four
 separate trust domains. Do not collapse them into one “release succeeded”
 claim:
 
@@ -10,10 +10,11 @@ claim:
 2. A trusted local macOS finalizer prepares the exact asset set, signs the three
    macOS binaries, submits their exact ZIP archives for notarization, and stages
    the complete asset set on that same still-unpublished Draft.
-3. The credential-isolated `Validate Signed Draft` workflow downloads the
-   numeric Draft assets and performs runtime acceptance on Apple silicon and
-   Intel hosts. It emits one receipt bound to the exact workflow, run, attempt,
-   Draft identity, asset IDs, sizes, and digests.
+3. The credential-isolated `Validate Signed Draft` workflow reads the numeric
+   Draft only in isolated fetch jobs, transfers verified bytes through
+   attempt-bound Actions artifacts, and performs runtime acceptance in separate
+   read-only Apple silicon and Intel jobs. It emits one receipt bound to the
+   exact workflow, run, attempt, Draft identity, asset IDs, sizes, and digests.
 4. The local finalizer consumes that exact hosted receipt, publishes by numeric
    release ID, anonymously downloads the immutable public release and every
    numeric asset again, and writes `public-verified.json`.
@@ -34,7 +35,7 @@ finish with no errors or warnings:
 ```
 
 Confirm that `CHANGELOG.md`, `.codex-plugin/plugin.json`, every Cargo workspace
-package, `Cargo.lock`, and the planned tag all identify v0.2.5. Treat
+package, `Cargo.lock`, and the planned tag all identify v0.2.6. Treat
 `scripts/release-targets.json` as the only release target inventory.
 
 GitHub immutable releases must already be enabled for the repository before
@@ -63,7 +64,7 @@ release happens to be newest:
 ```bash
 RELEASE_CHECKOUT='/absolute/path/to/the/clean/tagged/checkout'
 RELEASE_REPOSITORY='<owner>/<repository>'
-RELEASE_TAG='v0.2.5'
+RELEASE_TAG='v0.2.6'
 RELEASE_HEAD_SHA='<40-character-lowercase-tagged-commit-sha>'
 IDENTITY_SHA1='<40-character-uppercase-developer-id-fingerprint>'
 NOTARY_PROFILE='<existing-keychain-profile-name>'
@@ -84,6 +85,13 @@ workflow reached an empty Draft and local preparation completed, but the tagged
 finalizer could not resume that sealed asset set for the next documented phase.
 Preserve its tag, empty Draft, workflow attempts, artifacts, and local receipts.
 Do not delete, move, reuse, publish, or finalize any part of that attempt.
+
+The annotated `v0.2.5` tag records a third unpublished attempt. Its exact
+signed assets reached the bound Draft, but hosted validation proved that a
+read-only GitHub Actions installation token cannot inspect an unpublished
+release. Preserve its tag, populated Draft, workflow runs, artifacts, local
+receipts, and notarization jobs. Do not delete, move, reuse, publish, or
+finalize any part of that attempt.
 
 ## 1. Freeze the annotated tag and source workflow attempt
 
@@ -190,7 +198,12 @@ do not edit its append-only receipts.
 ## 3. Dispatch and bind hosted signed-Draft validation
 
 Dispatch `Validate Signed Draft` using the tag ref, never the default branch or
-a moving branch. The workflow receives no signing or notarization credential:
+a moving branch. GitHub exposes Draft releases only to a push-capable identity,
+so the workflow grants its installation token `contents: write` only in
+isolated jobs that perform bound GETs and never extract or execute candidates.
+The native validation and receipt jobs remain read-only, credentials are not
+persisted, and candidate processes receive a minimal environment with no GitHub
+token. The workflow receives no signing or notarization credential:
 
 ```bash
 gh workflow run validate-signed-draft.yml \
