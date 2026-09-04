@@ -218,11 +218,30 @@ class ReleaseTargetContractTests(unittest.TestCase):
         ]
 
         self.assertEqual(contract.release_toolchain, "1.97.1")
+        self.assertEqual(
+            contract.macos_signing,
+            release_targets.MacOSSigningPolicy(
+                team_id="YKUPL7Z869",
+                code_identifier="io.github.billlza.app-icon-toolkit.mcp",
+            ),
+        )
         self.assertEqual([target.id for target in contract.targets], expected_ids)
         self.assertEqual(
             [entry["id"] for entry in (target.matrix_entry() for target in contract.targets)],
             expected_ids,
         )
+        self.assertEqual(
+            [entry["artifact_name"] for entry in (target.matrix_entry() for target in contract.targets)],
+            [target.artifact_name for target in contract.targets],
+        )
+        self.assertEqual(
+            contract.targets[0].artifact_name_for_attempt(2),
+            f"{contract.targets[0].artifact_name}-attempt-2",
+        )
+        for invalid_attempt in (0, -1, True):
+            with self.subTest(invalid_attempt=invalid_attempt):
+                with self.assertRaises(RuntimeError):
+                    contract.targets[0].artifact_name_for_attempt(invalid_attempt)
         self.assertEqual(
             [target.id for target in contract.targets if target.codex_install_verify],
             [
@@ -232,6 +251,22 @@ class ReleaseTargetContractTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len({target.id for target in contract.targets}), len(contract.targets))
+        self.assertEqual(
+            {
+                target.id: target.archive_format
+                for target in contract.targets
+            },
+            {
+                "x86_64-unknown-linux-gnu": "tar.gz",
+                "x86_64-unknown-linux-musl": "tar.gz",
+                "aarch64-unknown-linux-musl": "tar.gz",
+                "aarch64-apple-darwin": "zip",
+                "x86_64-apple-darwin": "zip",
+                "universal2-apple-darwin": "zip",
+                "x86_64-pc-windows-msvc": "zip",
+                "aarch64-pc-windows-msvc": "zip",
+            },
+        )
         universal = contract.target("universal2-apple-darwin")
         self.assertEqual(
             set(universal.rust_targets),
@@ -239,8 +274,11 @@ class ReleaseTargetContractTests(unittest.TestCase):
         )
         self.assertIsNone(universal.test_target)
         self.assertEqual(universal.native_verify_runner, "macos-26-intel")
+        self.assertEqual(universal.macos_architectures(), ("arm64", "x86_64"))
+        with self.assertRaisesRegex(RuntimeError, "not macOS"):
+            contract.target("x86_64-unknown-linux-gnu").macos_architectures()
 
-    def test_rejects_unknown_fields_and_duplicate_ids(self) -> None:
+    def test_rejects_invalid_contract_structure_and_target_relationships(self) -> None:
         source = Path(release_targets.CONTRACT_PATH).read_text(encoding="utf-8")
         contract_value = json.loads(source)
         cases = []
@@ -248,6 +286,30 @@ class ReleaseTargetContractTests(unittest.TestCase):
         unknown = copy.deepcopy(contract_value)
         unknown["targets"][0]["unreviewed"] = True
         cases.append((unknown, "unknown fields"))
+
+        old_schema = copy.deepcopy(contract_value)
+        old_schema["schema_version"] = 2
+        cases.append((old_schema, "schema_version must be 3"))
+
+        missing_signing = copy.deepcopy(contract_value)
+        missing_signing.pop("macos_signing")
+        cases.append((missing_signing, "missing fields.*macos_signing"))
+
+        unknown_signing_field = copy.deepcopy(contract_value)
+        unknown_signing_field["macos_signing"]["identity_sha1"] = "0" * 40
+        cases.append((unknown_signing_field, "macos_signing has unknown fields"))
+
+        missing_signing_field = copy.deepcopy(contract_value)
+        missing_signing_field["macos_signing"].pop("code_identifier")
+        cases.append((missing_signing_field, "macos_signing is missing fields"))
+
+        invalid_team_id = copy.deepcopy(contract_value)
+        invalid_team_id["macos_signing"]["team_id"] = "ykUPL7Z869"
+        cases.append((invalid_team_id, "team_id must be exactly 10 uppercase"))
+
+        invalid_code_identifier = copy.deepcopy(contract_value)
+        invalid_code_identifier["macos_signing"]["code_identifier"] = "../tool"
+        cases.append((invalid_code_identifier, "dot-separated code-signing identifier"))
 
         duplicate = copy.deepcopy(contract_value)
         duplicate["targets"].append(copy.deepcopy(duplicate["targets"][0]))
@@ -268,6 +330,22 @@ class ReleaseTargetContractTests(unittest.TestCase):
         missing_minimum = copy.deepcopy(contract_value)
         missing_minimum["targets"][3].pop("macos_minimum")
         cases.append((missing_minimum, "macos_minimum"))
+
+        macos_tar = copy.deepcopy(contract_value)
+        macos_tar["targets"][3]["archive_format"] = "tar.gz"
+        cases.append((macos_tar, "archive_format must be zip for macos"))
+
+        universal_tar = copy.deepcopy(contract_value)
+        universal_tar["targets"][5]["archive_format"] = "tar.gz"
+        cases.append((universal_tar, "archive_format must be zip for macos_universal2"))
+
+        linux_zip = copy.deepcopy(contract_value)
+        linux_zip["targets"][0]["archive_format"] = "zip"
+        cases.append((linux_zip, "archive_format must be tar.gz for linux_gnu"))
+
+        windows_tar = copy.deepcopy(contract_value)
+        windows_tar["targets"][-1]["archive_format"] = "tar.gz"
+        cases.append((windows_tar, "archive_format must be zip for windows_msvc"))
 
         wrong_python = copy.deepcopy(contract_value)
         wrong_python["targets"][-1]["python"] = "python3"
@@ -407,6 +485,34 @@ class ReleaseTargetContractTests(unittest.TestCase):
             all(entry["codex_install_verify"] for entry in matrix["include"])
         )
 
+    def test_universal_verify_matrix_carries_the_archive_contract(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS_ROOT / "release_targets.py"),
+                "universal-verify-matrix",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "include": [
+                    {
+                        "id": "universal2-apple-darwin",
+                        "runner": "macos-26-intel",
+                        "archive_format": "zip",
+                        "binary_name": "app-icon-toolkit-mcp",
+                    }
+                ]
+            },
+        )
+
 
 class HostCompatibilityContractTests(unittest.TestCase):
     def test_codex_host_test_version_is_exact_and_packaged(self) -> None:
@@ -436,7 +542,7 @@ class InstalledBinaryNameTests(unittest.TestCase):
 
     def test_uses_the_selected_plugin_roots_contract(self) -> None:
         contract = json.loads(Path(release_targets.CONTRACT_PATH).read_text(encoding="utf-8"))
-        contract["schema_version"] = 3
+        contract["schema_version"] = 4
         with tempfile.TemporaryDirectory(prefix="alternate-plugin-root-") as temporary:
             root = Path(temporary)
             scripts = root / "scripts"
@@ -546,6 +652,28 @@ class ReleaseBinaryInspectionTests(unittest.TestCase):
 
 
 class ReleaseCandidatePublicationTests(unittest.TestCase):
+    def test_macos_release_environment_forces_unsigned_linking(self) -> None:
+        target = release_targets.load_contract().target("aarch64-apple-darwin")
+        with mock.patch.dict(
+            build_release_binary.os.environ,
+            {"RUSTFLAGS": "", "CARGO_ENCODED_RUSTFLAGS": ""},
+        ):
+            environment = build_release_binary.release_environment(target)
+        self.assertEqual(environment["MACOSX_DEPLOYMENT_TARGET"], "13.0")
+        self.assertEqual(
+            environment["CARGO_ENCODED_RUSTFLAGS"],
+            build_release_binary.MACOS_UNSIGNED_RUSTFLAGS,
+        )
+        self.assertNotIn("RUSTFLAGS", environment)
+
+        for variable in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
+            with self.subTest(variable=variable), mock.patch.dict(
+                build_release_binary.os.environ,
+                {variable: "-C target-cpu=native"},
+            ):
+                with self.assertRaisesRegex(RuntimeError, f"ambient {variable}"):
+                    build_release_binary.release_environment(target)
+
     def test_concurrent_publish_never_replaces_the_winner(self) -> None:
         with tempfile.TemporaryDirectory(prefix="candidate-publish-test-") as temporary:
             root = Path(temporary)
@@ -603,11 +731,19 @@ class ReleaseCandidatePublicationTests(unittest.TestCase):
                 binary.parent.mkdir(parents=True, exist_ok=True)
                 binary.write_bytes(b"thin release binary")
 
-            with mock.patch.object(build_release_binary, "run_build", side_effect=fake_build):
+            with mock.patch.object(
+                build_release_binary,
+                "run_build",
+                side_effect=fake_build,
+            ), mock.patch.object(
+                build_release_binary,
+                "verify_unsigned_macos_binary",
+            ) as verify_unsigned:
                 build_release_binary.build_candidate(root, contract, target, destination)
 
             self.assertEqual(calls, [("aarch64-apple-darwin", "13.0")])
             self.assertEqual(destination.read_bytes(), b"thin release binary")
+            self.assertEqual(verify_unsigned.call_count, 2)
 
     def test_macos_build_uses_contract_minimum_and_cleans_lipo_failure(self) -> None:
         contract = release_targets.load_contract()
@@ -630,6 +766,9 @@ class ReleaseCandidatePublicationTests(unittest.TestCase):
                 binary.write_bytes(rust_target.encode("utf-8"))
 
             with mock.patch.object(build_release_binary, "run_build", side_effect=fake_build), mock.patch.object(
+                build_release_binary,
+                "verify_unsigned_macos_binary",
+            ), mock.patch.object(
                 build_release_binary.subprocess,
                 "run",
                 side_effect=subprocess.CalledProcessError(1, ["xcrun", "lipo"]),
@@ -639,6 +778,56 @@ class ReleaseCandidatePublicationTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
             self.assertEqual(list(destination.parent.glob("*.tmp")), [])
+
+    def test_indeterminate_candidate_publication_preserves_the_complete_temporary(
+        self,
+    ) -> None:
+        contract = release_targets.load_contract()
+        target = contract.target("aarch64-apple-darwin")
+        with tempfile.TemporaryDirectory(prefix="candidate-unknown-test-") as temporary:
+            root = Path(temporary)
+            destination = root / "candidate" / target.binary_name
+
+            def fake_build(
+                build_root: Path,
+                _contract,
+                rust_target: str,
+                _environment: dict[str, str],
+            ) -> None:
+                binary = build_release_binary.cargo_binary(
+                    build_root, _contract, rust_target, target.binary_name
+                )
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_bytes(b"complete release candidate")
+
+            with mock.patch.object(
+                build_release_binary,
+                "run_build",
+                side_effect=fake_build,
+            ), mock.patch.object(
+                build_release_binary,
+                "verify_unsigned_macos_binary",
+            ), mock.patch.object(
+                build_release_binary,
+                "publish_candidate_no_replace",
+                side_effect=build_release_binary.FilePublicationIndeterminate(
+                    "injected unknown publication"
+                ),
+            ):
+                with self.assertRaises(
+                    build_release_binary.FilePublicationIndeterminate
+                ):
+                    build_release_binary.build_candidate(
+                        root,
+                        contract,
+                        target,
+                        destination,
+                    )
+
+            preserved = list(destination.parent.glob(f".{destination.name}.*.tmp"))
+            self.assertFalse(destination.exists())
+            self.assertEqual(len(preserved), 1)
+            self.assertEqual(preserved[0].read_bytes(), b"complete release candidate")
 
 
 class ReleaseToolchainInstallTests(unittest.TestCase):

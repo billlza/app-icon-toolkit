@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -31,6 +31,24 @@ const PLAN_DESCRIPTION: &str =
     "Validate sources and return the exact plan without writes or publication-readiness checks.";
 const GENERATE_DESCRIPTION: &str =
     "Create a complete icon set in a new output whose parent already exists.";
+
+fn host_style_stdio_program() -> PathBuf {
+    let program = PathBuf::from(env!("CARGO_BIN_EXE_app-icon-toolkit-mcp"));
+    #[cfg(windows)]
+    {
+        let mut program = program;
+        assert_eq!(
+            program.extension().and_then(|value| value.to_str()),
+            Some("exe")
+        );
+        program.set_extension("");
+        program
+    }
+    #[cfg(not(windows))]
+    {
+        program
+    }
+}
 
 #[test]
 fn plugin_manifest_contract_matches_the_cargo_binary() -> TestResult {
@@ -306,7 +324,7 @@ async fn concurrent_generate_calls_have_one_success_and_one_busy_failure() -> Te
 
 #[tokio::test]
 async fn stdio_binary_speaks_only_newline_delimited_json_rpc_on_stdout() -> TestResult {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_app-icon-toolkit-mcp"))
+    let mut child = Command::new(host_style_stdio_program())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -343,6 +361,12 @@ async fn stdio_binary_speaks_only_newline_delimited_json_rpc_on_stdout() -> Test
             .pointer("/result/serverInfo/name")
             .and_then(Value::as_str),
         Some("app-icon-toolkit")
+    );
+    assert_eq!(
+        initialize
+            .pointer("/result/serverInfo/version")
+            .and_then(Value::as_str),
+        Some(env!("CARGO_PKG_VERSION"))
     );
     assert_eq!(
         initialize

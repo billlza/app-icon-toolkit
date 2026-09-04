@@ -3,6 +3,51 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.2.3 - 2026-09-04
+
+### Added
+
+- Sign the ARM64, Intel, and Universal2 macOS MCP executables with Developer ID,
+  submit the exact public ZIP archives for Apple notarization, and verify the
+  online notarization ticket for every architecture.
+- Add a fail-closed local release finalizer that binds annotated tag, commit,
+  workflow run and attempt, numeric Actions artifact IDs and digests, numeric
+  Draft identity, signing identity, notarization jobs, and the final asset set
+  in append-only private receipts.
+- Run signed macOS runtime acceptance on credential-isolated Apple silicon and
+  Intel hosts before publication, then verify the immutable public release and
+  every asset again through anonymous numeric GitHub endpoints.
+- Validate prebuilt installation in an isolated, credential-free Codex home,
+  including the host-resolved MCP command, independent cache, runtime server
+  identity, and a complete protocol-and-generation smoke test.
+
+### Changed
+
+- Package macOS releases as ZIP instead of `tar.gz`, while retaining `tar.gz`
+  for Linux and ZIP for Windows.
+- Make the tag workflow retain attempt-qualified unsigned candidates and stage
+  an empty Draft; signing, notarization, Draft upload, validation, and final
+  publication now remain separate evidence gates.
+- Require prebuilt installs and upgrades to use new versioned directories, with
+  explicit local-marketplace replacement, verification, and rollback steps.
+
+### Fixed
+
+- Preserve Unix regular-file type and executable permission metadata so macOS
+  Archive Utility and `ditto` extract a runnable MCP executable.
+- Reject mixed workflow-attempt candidate sets, ambiguous mutation outcomes,
+  replaced release identities, and GitHub asset uploads routed through the
+  incorrect API hostname.
+- Bind extraction and precise allowlist rollback to one stable output-directory
+  capability, recover unsigned candidate staging without deleting signed state,
+  and retain stable-file checks when a parser also fails.
+- Reauthorize bounded release-package inputs at the copy boundary, stream ZIP
+  members, cap final output, normalize damaged DEFLATE failures, and persist an
+  intent before every Draft asset upload.
+- Reject plugin packages whose runtime MCP identity differs from the manifest,
+  and verify Windows' extensionless launcher contract through Rust rather than
+  substituting Python process-resolution behavior.
+
 ## 0.2.2 - 2026-09-04
 
 ### Added

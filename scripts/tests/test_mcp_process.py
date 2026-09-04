@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,19 @@ from release_test_support import smoke_installed_plugin
 
 
 class PackagedCommandResolutionTests(unittest.TestCase):
+    def test_server_identity_must_match_the_plugin_manifest(self) -> None:
+        smoke_installed_plugin.validate_server_identity(
+            {"name": "app-icon-toolkit", "version": "0.2.3"},
+            "app-icon-toolkit",
+            "0.2.3",
+        )
+        with self.assertRaisesRegex(RuntimeError, "server identity"):
+            smoke_installed_plugin.validate_server_identity(
+                {"name": "app-icon-toolkit", "version": "0.2.2"},
+                "app-icon-toolkit",
+                "0.2.3",
+            )
+
     def test_resolves_from_plugin_cwd_instead_of_parent_process_cwd(self) -> None:
         with tempfile.TemporaryDirectory(prefix="app-icon-command-test-") as temporary:
             temporary_root = Path(temporary)
@@ -293,6 +307,78 @@ class McpProcessLifecycleTests(unittest.TestCase):
             len(process._stderr_capture),
             smoke_installed_plugin.STDERR_CAPTURE_LIMIT,
         )
+
+    def test_oversized_stdout_line_is_rejected_before_json_parsing(self) -> None:
+        process = object.__new__(smoke_installed_plugin.McpProcess)
+        process._process = _CompletedProcessFixture()
+        process._process.stdout = io.StringIO(
+            "x" * (smoke_installed_plugin.STDOUT_LINE_LIMIT + 1)
+        )
+        process._messages = queue.Queue()
+        process._seen = []
+
+        process._read_stdout()
+
+        error = process._messages.get_nowait()
+        self.assertIsInstance(error, RuntimeError)
+        self.assertRegex(str(error), "stdout line exceeded the size limit")
+        self.assertIsNone(process._messages.get_nowait())
+        self.assertEqual(process._seen, [])
+
+    def test_protocol_message_count_is_bounded(self) -> None:
+        process = object.__new__(smoke_installed_plugin.McpProcess)
+        process._process = _CompletedProcessFixture()
+        line = '{"jsonrpc":"2.0"}\n'
+        process._process.stdout = io.StringIO(
+            line * (smoke_installed_plugin.PROTOCOL_MESSAGE_LIMIT + 1)
+        )
+        process._messages = queue.Queue()
+        process._seen = []
+
+        process._read_stdout()
+
+        observed = []
+        while not process._messages.empty():
+            observed.append(process._messages.get_nowait())
+        self.assertEqual(
+            len(process._seen),
+            smoke_installed_plugin.PROTOCOL_MESSAGE_LIMIT,
+        )
+        self.assertIsInstance(observed[-2], RuntimeError)
+        self.assertRegex(str(observed[-2]), "protocol message limit")
+        self.assertIsNone(observed[-1])
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process groups")
+    def test_residual_process_group_is_killed_and_reported(self) -> None:
+        process = object.__new__(smoke_installed_plugin.McpProcess)
+        child = (
+            "import subprocess,sys; "
+            "subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+            "print('{\"jsonrpc\":\"2.0\",\"id\":1}', flush=True)"
+        )
+        process._process = subprocess.Popen(
+            [sys.executable, "-c", child],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            start_new_session=True,
+        )
+        process._process_group_id = process._process.pid
+        process._start_readers()
+        process._closed = False
+        self.assertEqual(process.response(1, timeout_seconds=10)["id"], 1)
+
+        with self.assertRaisesRegex(
+            smoke_installed_plugin.McpProcessFailure,
+            "left descendant processes",
+        ):
+            process.close()
+
+        self.assertTrue(process._process.stdin.closed)
+        self.assertTrue(process._process.stdout.closed)
+        self.assertTrue(process._process.stderr.closed)
 
 if __name__ == "__main__":
     unittest.main()

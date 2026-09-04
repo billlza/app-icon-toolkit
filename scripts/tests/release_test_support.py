@@ -3,11 +3,36 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import sys
+import unittest
 
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
+
+
+def create_symlink_or_skip(
+    testcase: unittest.TestCase,
+    link: Path,
+    target: Path,
+) -> None:
+    """Create a test symlink or skip only when Windows lacks that capability."""
+
+    try:
+        link.symlink_to(target)
+    except NotImplementedError as error:
+        if os.name == "nt":
+            testcase.skipTest(
+                f"Windows symbolic-link creation is unsupported: {error}"
+            )
+        raise
+    except OSError as error:
+        if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+            testcase.skipTest(
+                "Windows symbolic-link creation requires an unavailable privilege"
+            )
+        raise
 
 
 def load_script(module_name: str, filename: str):
@@ -27,6 +52,11 @@ def load_script(module_name: str, filename: str):
 
 
 release_targets = load_script("release_targets", "release_targets.py")
+release_files = load_script("release_files", "release_files.py")
+release_zip_preflight = load_script(
+    "release_zip_preflight",
+    "release_zip_preflight.py",
+)
 release_package = load_script("release_package", "release_package.py")
 prepare_release_package = load_script(
     "prepare_release_package", "prepare-release-package.py"
@@ -45,6 +75,12 @@ install_release_toolchain = load_script(
 )
 check_release_version = load_script(
     "check_release_version", "check-release-version.py"
+)
+stage_release_draft = load_script(
+    "stage_release_draft", "stage-release-draft.py"
+)
+validate_signed_draft = load_script(
+    "validate_signed_draft", "validate-signed-draft.py"
 )
 check_codex_plugin_install = load_script(
     "check_codex_plugin_install", "check-codex-plugin-install.py"

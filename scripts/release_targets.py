@@ -15,7 +15,25 @@ CONTRACT_PATH = Path(__file__).with_name("release-targets.json")
 TARGET_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 RUST_TRIPLE = re.compile(r"^[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_.-]+$")
 TOOLCHAIN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
-ROOT_FIELDS = frozenset({"schema_version", "release_toolchain", "targets"})
+STABLE_TAG = re.compile(
+    r"^v(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)$"
+)
+REPOSITORY = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/"
+    r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})$"
+)
+COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+TEAM_ID = re.compile(r"^[A-Z0-9]{10}$")
+CODE_IDENTIFIER_COMPONENT = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+CODE_IDENTIFIER = re.compile(
+    rf"^{CODE_IDENTIFIER_COMPONENT}(?:\.{CODE_IDENTIFIER_COMPONENT})+$"
+)
+ROOT_FIELDS = frozenset(
+    {"schema_version", "release_toolchain", "macos_signing", "targets"}
+)
+MACOS_SIGNING_FIELDS = frozenset({"team_id", "code_identifier"})
 TARGET_FIELDS = frozenset(
     {
         "id",
@@ -38,6 +56,38 @@ FAMILIES = frozenset(
 
 
 @dataclass(frozen=True)
+class MacOSSigningPolicy:
+    """Stable Developer ID identity fields shared by every macOS target."""
+
+    team_id: str
+    code_identifier: str
+
+
+def validate_release_tag(tag: str) -> str:
+    """Return one portable stable version tag or fail closed."""
+
+    if not isinstance(tag, str) or STABLE_TAG.fullmatch(tag) is None:
+        raise RuntimeError(f"release tag is not a stable semantic version: {tag!r}")
+    return tag
+
+
+def validate_repository(repository: str) -> str:
+    """Return one bounded GitHub owner/repository slug or fail closed."""
+
+    if not isinstance(repository, str) or REPOSITORY.fullmatch(repository) is None:
+        raise RuntimeError(f"invalid GitHub repository name: {repository!r}")
+    return repository
+
+
+def validate_commit_sha(head_sha: str) -> str:
+    """Return one exact lowercase Git commit SHA-1 or fail closed."""
+
+    if not isinstance(head_sha, str) or COMMIT_SHA.fullmatch(head_sha) is None:
+        raise RuntimeError("release commit must be an exact lowercase SHA-1")
+    return head_sha
+
+
+@dataclass(frozen=True)
 class ReleaseTarget:
     """One independently built and smoke-tested release archive."""
 
@@ -56,20 +106,35 @@ class ReleaseTarget:
 
     @property
     def artifact_name(self) -> str:
-        """Return the GitHub Actions artifact name."""
+        """Return the stable base of the GitHub Actions artifact name."""
 
         return f"app-icon-toolkit-{self.id}"
+
+    def artifact_name_for_attempt(self, run_attempt: int) -> str:
+        """Bind the Actions artifact name to one full workflow run attempt."""
+
+        if (
+            isinstance(run_attempt, bool)
+            or not isinstance(run_attempt, int)
+            or run_attempt <= 0
+        ):
+            raise RuntimeError("workflow run attempt must be a positive integer")
+        return f"{self.artifact_name}-attempt-{run_attempt}"
 
     def release_filename(self, tag: str) -> str:
         """Return the public archive filename for a version tag."""
 
-        return f"app-icon-toolkit-{tag}-{self.id}.{self.archive_format}"
+        return (
+            f"app-icon-toolkit-{validate_release_tag(tag)}-"
+            f"{self.id}.{self.archive_format}"
+        )
 
     def matrix_entry(self) -> dict[str, Any]:
         """Return the JSON object consumed by a GitHub Actions matrix."""
 
         return {
             "id": self.id,
+            "artifact_name": self.artifact_name,
             "runner": self.runner,
             "rust_targets": list(self.rust_targets),
             "test_target": self.test_target or "",
@@ -81,12 +146,23 @@ class ReleaseTarget:
             "native_verify_runner": self.native_verify_runner or "",
         }
 
+    def macos_architectures(self) -> tuple[str, ...]:
+        """Return the exact Mach-O architecture contract for a macOS target."""
+
+        if self.family not in {"macos", "macos_universal2"}:
+            raise RuntimeError(f"release target is not macOS: {self.id}")
+        mapping = {"aarch64": "arm64", "x86_64": "x86_64"}
+        return tuple(
+            sorted(mapping[triple.split("-", maxsplit=1)[0]] for triple in self.rust_targets)
+        )
+
 
 @dataclass(frozen=True)
 class ReleaseContract:
     """Validated release toolchain and target inventory."""
 
     release_toolchain: str
+    macos_signing: MacOSSigningPolicy
     targets: tuple[ReleaseTarget, ...]
 
     def target(self, target_id: str) -> ReleaseTarget:
@@ -125,6 +201,32 @@ def _expect_bool(value: Any, context: str) -> bool:
     if not isinstance(value, bool):
         raise RuntimeError(f"{context} must be a boolean")
     return value
+
+
+def _parse_macos_signing(raw_value: Any) -> MacOSSigningPolicy:
+    context = "macos_signing"
+    raw = _expect_object(raw_value, context)
+    unknown = set(raw) - MACOS_SIGNING_FIELDS
+    missing = MACOS_SIGNING_FIELDS - set(raw)
+    if unknown:
+        raise RuntimeError(f"{context} has unknown fields: {sorted(unknown)}")
+    if missing:
+        raise RuntimeError(f"{context} is missing fields: {sorted(missing)}")
+
+    team_id = _expect_string(raw["team_id"], f"{context}.team_id")
+    if TEAM_ID.fullmatch(team_id) is None:
+        raise RuntimeError(
+            f"{context}.team_id must be exactly 10 uppercase ASCII letters or digits"
+        )
+
+    code_identifier = _expect_string(
+        raw["code_identifier"], f"{context}.code_identifier"
+    )
+    if CODE_IDENTIFIER.fullmatch(code_identifier) is None:
+        raise RuntimeError(
+            f"{context}.code_identifier must be a dot-separated code-signing identifier"
+        )
+    return MacOSSigningPolicy(team_id=team_id, code_identifier=code_identifier)
 
 
 def _parse_target(raw_value: Any, index: int) -> ReleaseTarget:
@@ -195,8 +297,15 @@ def _validate_target_relationships(target: ReleaseTarget, context: str) -> None:
     expected_binary = "app-icon-toolkit-mcp.exe" if is_windows else "app-icon-toolkit-mcp"
     if target.binary_name != expected_binary:
         raise RuntimeError(f"{context}.binary_name does not match its platform family")
-    if is_windows != (target.archive_format == "zip"):
-        raise RuntimeError(f"{context}.archive_format does not match its platform family")
+    expected_archive_format = (
+        "zip"
+        if target.family in {"macos", "macos_universal2", "windows_msvc"}
+        else "tar.gz"
+    )
+    if target.archive_format != expected_archive_format:
+        raise RuntimeError(
+            f"{context}.archive_format must be {expected_archive_format} for {target.family}"
+        )
     if target.family == "linux_gnu":
         if target.glibc_max is None or re.fullmatch(r"[0-9]+\.[0-9]+", target.glibc_max) is None:
             raise RuntimeError(f"{context}.glibc_max must be a numeric major.minor version")
@@ -287,11 +396,12 @@ def load_contract(path: Path = CONTRACT_PATH) -> ReleaseContract:
         raise RuntimeError(f"release target contract has unknown fields: {sorted(unknown)}")
     if missing:
         raise RuntimeError(f"release target contract is missing fields: {sorted(missing)}")
-    if raw["schema_version"] != 2:
-        raise RuntimeError("release target contract schema_version must be 2")
+    if raw["schema_version"] != 3:
+        raise RuntimeError("release target contract schema_version must be 3")
     toolchain = _expect_string(raw["release_toolchain"], "release_toolchain")
     if TOOLCHAIN.fullmatch(toolchain) is None:
         raise RuntimeError("release_toolchain must be an exact stable Rust version")
+    macos_signing = _parse_macos_signing(raw["macos_signing"])
     targets_value = raw["targets"]
     if not isinstance(targets_value, list) or not targets_value:
         raise RuntimeError("release target contract targets must be a non-empty array")
@@ -312,7 +422,11 @@ def load_contract(path: Path = CONTRACT_PATH) -> ReleaseContract:
             "clean Codex install verification must select exactly one target each "
             "for Linux, macOS, and Windows"
         )
-    return ReleaseContract(release_toolchain=toolchain, targets=targets)
+    return ReleaseContract(
+        release_toolchain=toolchain,
+        macos_signing=macos_signing,
+        targets=targets,
+    )
 
 
 def verify_release_assets(contract: ReleaseContract, directory: Path, tag: str) -> None:
@@ -364,7 +478,12 @@ def _main() -> None:
         )
     elif arguments.command == "universal-verify-matrix":
         entries = [
-            {"id": target.id, "runner": target.native_verify_runner}
+            {
+                "id": target.id,
+                "runner": target.native_verify_runner,
+                "archive_format": target.archive_format,
+                "binary_name": target.binary_name,
+            }
             for target in contract.targets
             if target.native_verify_runner is not None
         ]

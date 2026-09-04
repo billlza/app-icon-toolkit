@@ -78,8 +78,43 @@ executable from a project.
 Release archive verification accepts only the exact packaged file allowlist,
 ordinary files, fixed permission modes, and bounded member and total sizes. It
 rejects duplicate, traversal, link, sparse, encrypted, oversized, missing, or
-extra members before extraction. The same extractor is used after artifact
-download by clean-host installation and Universal2 verification jobs.
+extra members before extraction. Before constructing the `TarFile` or `ZipFile`
+container parser, a bounded fixed-header TAR scan rejects PAX/GNU extended
+metadata without reading its payload, and a bounded ZIP scan verifies the real
+central-directory record count rather than trusting its end record. Both scans
+and extraction retain one stable open archive descriptor. A failed extraction
+removes only unchanged, single-link allowlisted outputs and known empty parent
+directories; unknown or replaced entries fail closed and are preserved. The
+extractor pins the original output directory: POSIX operations are relative to
+its descriptor, while Windows holds a no-delete-sharing directory handle and
+rejects reparse roots. It also verifies that every completed member name still
+identifies the file descriptor it wrote. A renamed root or member therefore
+cannot silently redirect output or rollback deletion. Archive creation
+reauthorizes each stable source at the copy boundary, applies member and
+remaining-total byte ceilings while copying, streams ZIP members, and enforces
+an output-byte ceiling. The same extractor is used after artifact download by
+clean-host installation and Universal2 verification jobs.
+
+Release signing is a separate security boundary from ordinary icon generation.
+The tag workflow produces attempt-qualified unsigned candidates and an empty
+Draft; it has no Developer ID or notarization credentials. The trusted macOS
+finalizer downloads Actions artifacts by numeric ID, verifies GitHub's artifact
+ZIP digest, and binds the tag object, commit, workflow ID, run, attempt, release
+ID, and every public asset digest in append-only private receipts. Developer ID
+private keys remain in the local macOS Keychain and notarization credentials are
+referenced only by Keychain profile name. External submission and publication
+intents, including an intent for each individual Draft asset upload, are
+persisted before their one permitted mutation. An uncertain result requires
+read-only reconciliation and is never retried as an ordinary failure.
+
+Downloaded candidates are treated as potentially hostile on the signing host.
+Static Mach-O, signature, and notarization tools may inspect them, but the
+signing process never starts a candidate executable. Signed runtime tests run
+on credential-isolated hosted macOS workers with read-only repository access.
+The final release must be immutable, and its numeric release metadata and asset
+bytes are re-downloaded without GitHub credentials before completion is
+recorded. SHA-256 in this release pipeline binds exact bytes and detects
+replacement or corruption; it is not a substitute for Developer ID trust.
 
 No network service, authentication secret, telemetry, subprocess invocation,
 or project-provided executable is part of the MCP runtime.

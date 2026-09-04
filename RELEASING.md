@@ -1,23 +1,285 @@
 # Release process
 
-1. Confirm `CHANGELOG.md`, plugin version, workspace version, and release tag
-   agree. Validate `scripts/release-targets.json`; it is the only release target
-   inventory.
-2. Run `./scripts/generate-licenses.sh` and review dependency-license changes.
-3. Run `./scripts/check.sh` and every locally available native validation
-   profile with zero errors and zero warnings.
-4. Push the release commit to `main` and require every hosted CI job to pass,
-   including native ARM64, static-musl, Windows MSIX, and exact Universal2
-   archive verification.
-5. Create and push the annotated `v<version>` tag only from that green commit.
-6. Wait for the release workflow to build the exact contract-defined archive
-   set, execute package smoke tests, verify final binary architecture/runtime
-   dependencies, generate SHA-256 checksums for accidental-corruption detection,
-   and publish the GitHub Release.
-7. Confirm the Universal2 archive from the Apple-silicon build was downloaded
-   and smoke-tested on the Intel runner before publication.
-8. Download each asset, verify its checksum, and confirm the release page points
-   at the intended commit.
+This is the release runbook for v0.2.3 and later. A release passes through four
+separate trust domains. Do not collapse them into one “release succeeded”
+claim:
 
-Do not recreate a tag or parallel release after an ambiguous publication
-result. Reconcile the existing tag, workflow run, and GitHub Release first.
+1. The `Release` tag workflow builds and retains attempt-bound unsigned
+   candidates, runs portable and native gates, and creates or reconciles only an
+   empty Draft. It does not upload public assets and does not publish the Draft.
+2. A trusted local macOS finalizer prepares the exact asset set, signs the three
+   macOS binaries, submits their exact ZIP archives for notarization, and stages
+   the complete asset set on that same still-unpublished Draft.
+3. The credential-isolated `Validate Signed Draft` workflow downloads the
+   numeric Draft assets and performs runtime acceptance on Apple silicon and
+   Intel hosts. It emits one receipt bound to the exact workflow, run, attempt,
+   Draft identity, asset IDs, sizes, and digests.
+4. The local finalizer consumes that exact hosted receipt, publishes by numeric
+   release ID, anonymously downloads the immutable public release and every
+   numeric asset again, and writes `public-verified.json`.
+
+A Draft, an Apple `Accepted` response, a successful hosted validation run, or a
+public release without `public-verified.json` is not a completed release.
+
+## 0. Operator and repository prerequisites
+
+Use a clean checkout of the exact release commit. Run the complete local gate,
+review generated license changes, and require the exact commit's hosted CI to
+finish with no errors or warnings:
+
+```bash
+./scripts/generate-licenses.sh
+./scripts/check-licenses.sh
+./scripts/check.sh
+```
+
+Confirm that `CHANGELOG.md`, `.codex-plugin/plugin.json`, every Cargo workspace
+package, `Cargo.lock`, and the planned tag all identify v0.2.3. Treat
+`scripts/release-targets.json` as the only release target inventory.
+
+GitHub immutable releases must already be enabled for the repository before
+local finalization begins. An authorized repository administrator enables that
+policy out of band. This runbook deliberately contains no command that changes
+the repository setting. The finalizer reads the policy and fails closed unless
+the response says `enabled: true`; this read-only inspection is also available
+to the operator:
+
+```bash
+RELEASE_REPOSITORY='<owner>/<repository>'
+gh api --hostname github.com \
+  -H 'X-GitHub-Api-Version:2026-03-10' \
+  "repos/$RELEASE_REPOSITORY/immutable-releases"
+```
+
+Authenticate `gh` through the operator's normal credential store. Never put a
+GitHub token, Apple credential, private key, certificate export, or password in
+this runbook, a command argument, a receipt, or the repository. The
+`--notary-profile` value below is only the name of an existing local Keychain
+profile.
+
+Set explicit release bindings. Do not derive any of these from whichever run or
+release happens to be newest:
+
+```bash
+RELEASE_CHECKOUT='/absolute/path/to/the/clean/tagged/checkout'
+RELEASE_REPOSITORY='<owner>/<repository>'
+RELEASE_TAG='v0.2.3'
+RELEASE_HEAD_SHA='<40-character-lowercase-tagged-commit-sha>'
+IDENTITY_SHA1='<40-character-uppercase-developer-id-fingerprint>'
+NOTARY_PROFILE='<existing-keychain-profile-name>'
+RELEASE_EVIDENCE_ROOT='/absolute/private/path/release-evidence'
+install -d -m 700 "$RELEASE_EVIDENCE_ROOT"
+```
+
+The signing Mac must never execute a downloaded candidate. Its finalizer uses
+only static architecture, signature, package, and notarization-ticket checks.
+Actual MCP execution of signed Draft binaries belongs only to the
+credential-isolated hosted validation jobs.
+
+## 1. Freeze the annotated tag and source workflow attempt
+
+Before tagging, prove that the checkout is clean, that `HEAD` is the intended
+commit, and that the exact commit's `CI` run is green. Then create one annotated
+tag with neutral release naming and push that exact ref:
+
+```bash
+git -C "$RELEASE_CHECKOUT" status --short
+git -C "$RELEASE_CHECKOUT" rev-parse HEAD
+git -C "$RELEASE_CHECKOUT" tag -a "$RELEASE_TAG" "$RELEASE_HEAD_SHA" \
+  -m "Release $RELEASE_TAG"
+git -C "$RELEASE_CHECKOUT" push origin "refs/tags/$RELEASE_TAG"
+```
+
+Wait for every job in the resulting `Release` workflow to pass, including the
+empty-Draft staging job. Record the positive numeric workflow ID, run ID, and
+run attempt from that exact tag run:
+
+```bash
+SOURCE_WORKFLOW_ID='<numeric-release-workflow-id>'
+SOURCE_RUN_ID='<numeric-release-run-id>'
+SOURCE_RUN_ATTEMPT='<positive-run-attempt>'
+
+gh run view "$SOURCE_RUN_ID" --repo "$RELEASE_REPOSITORY" \
+  --json databaseId,workflowDatabaseId,attempt,headBranch,headSha,workflowName,event,status,conclusion
+```
+
+The returned workflow ID, run ID, attempt, tag ref, and head SHA must equal the
+recorded values. Inspect the Draft and record both its GraphQL node ID and its
+positive numeric database ID. At this point its `assets` array must be empty,
+`isDraft` must be true, and `isPrerelease` must be false:
+
+```bash
+gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
+  --json id,databaseId,tagName,name,body,isDraft,isPrerelease,assets
+
+RELEASE_NODE_ID='<exact-graphql-release-node-id>'
+RELEASE_DATABASE_ID='<positive-numeric-release-database-id>'
+```
+
+If the tag workflow must be rerun, only **Re-run all jobs** is allowed. With the
+CLI, `gh run rerun "$SOURCE_RUN_ID" --repo "$RELEASE_REPOSITORY"` means the
+whole run; never select “Re-run failed jobs”, rerun one job, or use `--failed`
+or `--job`. After a rerun, record the new `SOURCE_RUN_ATTEMPT` and start a new
+local attempt root. Never mix artifacts from different attempts.
+
+## 2. Prepare, notarize, and stage on the trusted Mac
+
+Create an attempt path outside the Git checkout. The path is bound to the exact
+source run and attempt and must be preserved for reconciliation:
+
+```bash
+ATTEMPT_ROOT="$RELEASE_EVIDENCE_ROOT/app-icon-toolkit-$RELEASE_TAG-run-$SOURCE_RUN_ID-attempt-$SOURCE_RUN_ATTEMPT"
+
+FINALIZER=(
+  python3 "$RELEASE_CHECKOUT/scripts/finalize-macos-release.py"
+  --plugin-root "$RELEASE_CHECKOUT"
+  --repository "$RELEASE_REPOSITORY"
+  --tag "$RELEASE_TAG"
+  --head-sha "$RELEASE_HEAD_SHA"
+  --workflow-id "$SOURCE_WORKFLOW_ID"
+  --run-id "$SOURCE_RUN_ID"
+  --run-attempt "$SOURCE_RUN_ATTEMPT"
+  --identity-sha1 "$IDENTITY_SHA1"
+  --notary-profile "$NOTARY_PROFILE"
+  --attempt-root "$ATTEMPT_ROOT"
+)
+```
+
+Run and inspect each phase separately. `prepare` downloads only the exact
+current-attempt artifacts, signs and statically verifies macOS binaries, builds
+the final archives, and produces the complete checksum set. It does not submit
+anything to Apple and does not execute a candidate:
+
+```bash
+"${FINALIZER[@]}" --stop-after prepare
+```
+
+`notarize` submits the exact three prepared macOS ZIP archives, requires Apple
+wait/info/log agreement with zero issues, and validates each standalone
+binary's online ticket:
+
+```bash
+"${FINALIZER[@]}" --stop-after notarize
+```
+
+`stage` uploads the exact archive allowlist and `SHA256SUMS` by numeric Draft
+identity. It persists one append-only intent before each asset POST, then
+verifies all remote sizes and digests while leaving the release unpublished. If
+the process stops after an intent is durable, resume is read-only until the
+remote asset is observed or `--reconcile-github-upload` explicitly authorizes
+the exact missing remainder:
+
+```bash
+"${FINALIZER[@]}" --stop-after stage
+```
+
+Re-run the read-only `gh release view` command from step 1. The GraphQL and
+numeric release IDs must be unchanged, the release must still be a Draft, and
+its assets must exactly match the stage result. Preserve the attempt directory;
+do not edit its append-only receipts.
+
+## 3. Dispatch and bind hosted signed-Draft validation
+
+Dispatch `Validate Signed Draft` using the tag ref, never the default branch or
+a moving branch. The workflow receives no signing or notarization credential:
+
+```bash
+gh workflow run validate-signed-draft.yml \
+  --repo "$RELEASE_REPOSITORY" \
+  --ref "$RELEASE_TAG" \
+  -f source_workflow_id="$SOURCE_WORKFLOW_ID" \
+  -f source_run_id="$SOURCE_RUN_ID" \
+  -f source_run_attempt="$SOURCE_RUN_ATTEMPT" \
+  -f release_id="$RELEASE_NODE_ID" \
+  -f release_database_id="$RELEASE_DATABASE_ID" \
+  -f tag="$RELEASE_TAG" \
+  -f head_sha="$RELEASE_HEAD_SHA" \
+  -f identity_sha1="$IDENTITY_SHA1"
+```
+
+Wait for all jobs in that exact dispatch to pass. Record and verify its numeric
+workflow ID, run ID, and attempt rather than selecting a run by recency:
+
+```bash
+HOSTED_WORKFLOW_ID='<numeric-validate-signed-draft-workflow-id>'
+HOSTED_RUN_ID='<numeric-hosted-validation-run-id>'
+HOSTED_RUN_ATTEMPT='<positive-hosted-run-attempt>'
+
+gh run view "$HOSTED_RUN_ID" --repo "$RELEASE_REPOSITORY" \
+  --json databaseId,workflowDatabaseId,attempt,headBranch,headSha,workflowName,event,status,conclusion
+```
+
+List that run's artifacts through the read-only numeric API. Select exactly one
+artifact named
+`hosted-validation-receipt-run-<run-id>-attempt-<run-attempt>`, verify it is not
+expired, and record its positive numeric ID, size, and SHA-256 digest:
+
+```bash
+gh api --hostname github.com --paginate \
+  "repos/$RELEASE_REPOSITORY/actions/runs/$HOSTED_RUN_ID/artifacts?per_page=100" \
+  --jq '.artifacts[] | {id,name,size_in_bytes,digest,expired}'
+
+HOSTED_RECEIPT_ARTIFACT_ID='<positive-numeric-receipt-artifact-id>'
+```
+
+If this workflow must be rerun, only **Re-run all jobs** is allowed. Record the
+new `HOSTED_RUN_ATTEMPT` and the new numeric receipt artifact ID. A receipt from
+an older or partial attempt cannot authorize publication.
+
+## 4. Publish and require anonymous public acceptance
+
+Resume the same local attempt and provide all four exact hosted-validation
+bindings. `publish` first binds and downloads the numeric receipt artifact,
+verifies the complete Draft again, and only then publishes by numeric release
+ID. Publication is immediately followed by credential-free public acceptance:
+
+```bash
+"${FINALIZER[@]}" \
+  --hosted-workflow-id "$HOSTED_WORKFLOW_ID" \
+  --hosted-run-id "$HOSTED_RUN_ID" \
+  --hosted-run-attempt "$HOSTED_RUN_ATTEMPT" \
+  --hosted-receipt-artifact-id "$HOSTED_RECEIPT_ARTIFACT_ID" \
+  --stop-after publish
+```
+
+The command is successful only when its final phase is `public-verified`. The
+anonymous acceptance stage fetches the numeric release JSON before and after
+all downloads, requires `immutable: true`, compares the exact numeric asset
+IDs, sizes, and SHA-256 digests, verifies the complete asset set and
+`SHA256SUMS`, safely extracts every archive, and statically revalidates all
+macOS signatures and online tickets. It never executes a published candidate.
+The finalizer writes the typed receipt to:
+
+```text
+<attempt-root>/public-verified.json
+```
+
+Do not announce completion unless `public-verified.json` is part of the same
+preserved attempt chain whose other receipts bind the exact source
+workflow/run/attempt, release ID, hosted workflow/run/attempt, numeric receipt
+artifact ID, tag, commit, and local attempt root.
+
+## 5. Outcome-unknown and retry rules
+
+Any Apple or GitHub mutation whose result cannot be proven is `UNKNOWN`, not a
+failure that may be retried blindly. Preserve the tag, Draft, attempt root,
+temporary evidence, intents, and receipts. The first response to every UNKNOWN
+outcome is read-only reconciliation:
+
+- Inspect Apple history/info/log for the existing archive digest. If a durable
+  notarization intent exists without a job receipt, adopt only the exact
+  matching UUID with `--adopt-submission TARGET=UUID`; do not submit again.
+- Inspect the bound numeric Draft/release and asset IDs with `gh release view`
+  and `gh api`. Do not create another release, move the tag, or replace assets.
+- `--reconcile-github-upload` may authorize only the exact missing upload
+  remainder after read-only reconciliation. `--reconcile-github-publish` may
+  authorize one exact retry only after reconciliation proves that the same
+  bound release is still a complete Draft. Neither flag is a blind retry.
+- If publication is already proven but anonymous GET or public-byte validation
+  failed, the release is `PUBLIC_BUT_UNVERIFIED`. Resume the same `publish`
+  command and binding without a reconciliation flag; the finalizer reconciles
+  the existing public release read-only and repeats only the anonymous GET
+  verification. It performs no new GitHub mutation.
+
+Never delete evidence to make a retry possible. Never reuse a local attempt
+root for a different tag, commit, workflow, run, or attempt.

@@ -135,11 +135,42 @@ marketplace metadata, documentation, and one target binary. Packaging extracts
 the final archive through a shared bounded allowlist extractor before comparing
 the complete file set and bytes with the source package and running the real
 stdio smoke test. The extractor validates all names, types, modes, counts, and
-declared sizes before writing a member; tar members are rejected before seeking
-past an oversized payload. Native macOS, GNU Linux, and Windows x64 candidates
-also pass an actual local-marketplace install and plugin-listing gate on fresh
-Codex hosts. A Git tree is a source distribution and intentionally contains no
-platform binary; it must be built before local marketplace registration.
+declared sizes before writing a member and rolls back only proven allowlisted
+outputs after a read or checksum failure. Before constructing the container
+parser, its fixed-header preflight rejects TAR extended headers without
+consuming their payload and scans ZIP central-directory records under a fixed
+metadata bound. The packager validates stable source sizes before output,
+reauthorizes the same snapshots at the actual copy boundary, streams every ZIP
+member, and applies the same member, remaining-total, and final-archive bounds.
+Extraction and rollback share one pinned output-root capability; POSIX uses
+descriptor-relative traversal, Windows denies root rename while its handle is
+live, and completed names are checked against their open file descriptors.
+Native macOS, GNU Linux, and Windows x64 candidates also pass an actual
+local-marketplace install and plugin-listing gate on fresh Codex hosts. A Git
+tree is a source distribution and intentionally contains no platform binary;
+it must be built before local marketplace registration.
+
+Release finalization has three credential domains. GitHub-hosted build jobs own
+the portable tests and unsigned candidate artifacts; artifact names include the
+workflow attempt. The local macOS signer owns Developer ID and notarization
+Keychain access, performs only static candidate inspection, and records every
+irreversible intent before crossing its external boundary. Unsigned extraction
+uses a private `candidate.partial` tree and promotes it only after complete
+validation and directory synchronization; persisted signing intent prevents
+automatic cleanup of possibly signed bytes. Every Draft asset POST has its own
+append-only intent, so a process interruption requires read-only reconciliation
+and explicit authorization before retry. Separate hosted macOS validation jobs
+receive no signing or notarization secrets and execute the signed Draft
+artifacts on both Apple silicon and Intel. The publisher consumes that exact
+hosted validation receipt, publishes the already complete Draft by numeric
+release ID, and then verifies the immutable public release through the anonymous
+numeric REST representation and asset endpoints.
+
+Release tooling follows the same dependency rule as the Rust workspace: shared
+target, stable-file, archive, receipt, GitHub-draft, macOS-signing, hosted-
+validation, and public-download modules expose narrow typed boundaries; the CLI
+coordinator sequences them and does not contain a second implementation of
+their validation logic.
 
 The local stdio adapter and a future public HTTPS adapter are separate
 capability boundaries. `workspace_root` grants the local process filesystem
