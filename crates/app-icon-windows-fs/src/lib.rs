@@ -159,8 +159,10 @@ fn is_windows_device_name(component: &str) -> bool {
         .map(str::trim_end)
         .map(str::to_ascii_uppercase)
         .unwrap_or_default();
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || stem.strip_prefix("COM").is_some_and(is_device_suffix)
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || stem.strip_prefix("COM").is_some_and(is_device_suffix)
         || stem.strip_prefix("LPT").is_some_and(is_device_suffix)
 }
 
@@ -612,6 +614,8 @@ mod tests {
             "nested/path",
             "nested\\path",
             "stream:data",
+            "CONIN$",
+            "conout$.preview",
             "COM0",
             "com¹.preview",
             "LPT²",

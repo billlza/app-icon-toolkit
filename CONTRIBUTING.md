@@ -17,6 +17,13 @@ Run the complete portable gate before opening a change:
 ./scripts/check.sh
 ```
 
+The complete gate and local plugin build allocate private Cargo target
+directories. When running ad hoc Cargo commands concurrently with different
+toolchains, give each command a distinct `CARGO_TARGET_DIR`; do not run
+`cargo clean` while a gate or local installation is active. Do not run multiple
+complete gates or local installations concurrently in one checkout: they
+publish to the same platform-specific binary under `bin/`.
+
 Run every native profile available on your host:
 
 ```sh

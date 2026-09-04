@@ -23,6 +23,15 @@ use tokio::{
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
+const SERVER_INSTRUCTIONS: &str = "Plan or create deterministic application icon assets from explicit PNG sources. Paths inside a job are relative to the absolute workspace_root. Planning does not inspect output publication readiness. Generation requires the output parent to exist and never overwrites an existing output directory.";
+const WORKSPACE_ROOT_DESCRIPTION: &str =
+    "Existing absolute capability root used to resolve every source and the requested output path.";
+const OUTPUT_DIRECTORY_DESCRIPTION: &str = "Workspace-relative output. Plan ignores publication readiness; generate requires an existing parent and absent output.";
+const PLAN_DESCRIPTION: &str =
+    "Validate sources and return the exact plan without writes or publication-readiness checks.";
+const GENERATE_DESCRIPTION: &str =
+    "Create a complete icon set in a new output whose parent already exists.";
+
 #[test]
 fn plugin_manifest_contract_matches_the_cargo_binary() -> TestResult {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -97,8 +106,8 @@ async fn duplex_client_lists_strict_schemas_and_receives_structured_errors() -> 
 
     let generate = find_tool(&tools, "generate_icon_set")?;
     let plan = find_tool(&tools, "plan_icon_set")?;
-    assert_request_schema(generate)?;
-    assert_request_schema(plan)?;
+    assert_request_schema(generate, GENERATE_DESCRIPTION)?;
+    assert_request_schema(plan, PLAN_DESCRIPTION)?;
     assert_output_schema(generate, &["output_directory", "artifacts"])?;
     assert_output_schema(plan, &["output_directory", "sources", "profiles"])?;
     assert_annotations(generate, false, false, false, false)?;
@@ -167,6 +176,77 @@ async fn duplex_client_lists_strict_schemas_and_receives_structured_errors() -> 
             .get("message")
             .and_then(Value::as_str)
             .is_some_and(|message| message.contains("workspace root must be an absolute path"))
+    );
+
+    let missing_arguments = generation_arguments(workspace.path(), "missing/generated")?;
+    let missing_plan = client
+        .call_tool(
+            CallToolRequestParams::new("plan_icon_set").with_arguments(missing_arguments.clone()),
+        )
+        .await?;
+    assert_ne!(missing_plan.is_error, Some(true));
+    assert_eq!(
+        missing_plan
+            .structured_content
+            .as_ref()
+            .and_then(|content| content.get("output_directory"))
+            .and_then(Value::as_str),
+        Some("missing/generated")
+    );
+    assert!(!workspace.path().join("missing").exists());
+
+    let parent_failure = client
+        .call_tool(
+            CallToolRequestParams::new("generate_icon_set").with_arguments(missing_arguments),
+        )
+        .await?;
+    assert_eq!(parent_failure.is_error, Some(true));
+    let parent_context = parent_failure
+        .structured_content
+        .as_ref()
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("output parent failure omitted structured content"))?;
+    assert_eq!(
+        parent_context.get("code").and_then(Value::as_str),
+        Some("OUTPUT_PARENT_UNAVAILABLE")
+    );
+    assert_eq!(
+        parent_context.get("relative_path").and_then(Value::as_str),
+        Some("missing/generated")
+    );
+    assert!(
+        parent_context
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message
+                .starts_with("parent directory for output `missing/generated` is unavailable: "))
+    );
+    assert!(!workspace.path().join("missing").exists());
+    let entries = fs::read_dir(workspace.path())?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].file_name(), "sources");
+
+    let reserved_failure = client
+        .call_tool(
+            CallToolRequestParams::new("plan_icon_set")
+                .with_arguments(generation_arguments(workspace.path(), "CONOUT$/generated")?),
+        )
+        .await?;
+    assert_eq!(reserved_failure.is_error, Some(true));
+    let reserved_context = reserved_failure
+        .structured_content
+        .as_ref()
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("reserved-path failure omitted structured content"))?;
+    assert_eq!(
+        reserved_context.get("code").and_then(Value::as_str),
+        Some("INVALID_REQUEST")
+    );
+    assert!(
+        reserved_context
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("Windows device names are not allowed"))
     );
 
     client.cancel().await?;
@@ -270,6 +350,12 @@ async fn stdio_binary_speaks_only_newline_delimited_json_rpc_on_stdout() -> Test
             .and_then(Value::as_str),
         Some("2025-11-25")
     );
+    assert_eq!(
+        initialize
+            .pointer("/result/instructions")
+            .and_then(Value::as_str),
+        Some(SERVER_INSTRUCTIONS)
+    );
 
     write_message(
         &mut stdin,
@@ -335,7 +421,7 @@ fn find_tool<'a>(tools: &'a [Tool], name: &str) -> TestResult<&'a Tool> {
         .ok_or_else(|| io::Error::other(format!("tool `{name}` was not listed")).into())
 }
 
-fn assert_request_schema(tool: &Tool) -> TestResult {
+fn assert_request_schema(tool: &Tool, expected_description: &str) -> TestResult {
     let schema = tool.input_schema.as_ref();
     assert_eq!(schema.get("type").and_then(Value::as_str), Some("object"));
     assert_eq!(
@@ -346,6 +432,8 @@ fn assert_request_schema(tool: &Tool) -> TestResult {
         schema,
         &["workspace_root", "output_directory", "sources", "targets"],
     )?;
+    assert_property_description(schema, "workspace_root", WORKSPACE_ROOT_DESCRIPTION)?;
+    assert_property_description(schema, "output_directory", OUTPUT_DIRECTORY_DESCRIPTION)?;
 
     let schema_text = serde_json::to_string(schema)?;
     for discriminator in [
@@ -360,11 +448,28 @@ fn assert_request_schema(tool: &Tool) -> TestResult {
             "input schema omitted target discriminator `{discriminator}`"
         );
     }
-    assert!(
-        tool.description
-            .as_deref()
-            .is_some_and(|description| !description.is_empty())
-    );
+    assert_eq!(tool.description.as_deref(), Some(expected_description));
+    Ok(())
+}
+
+fn assert_property_description(
+    schema: &Map<String, Value>,
+    property: &str,
+    expected: &str,
+) -> TestResult {
+    let description = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get(property))
+        .and_then(Value::as_object)
+        .and_then(|property_schema| property_schema.get("description"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "JSON Schema property `{property}` omitted its description"
+            ))
+        })?;
+    assert_eq!(description, expected);
     Ok(())
 }
 

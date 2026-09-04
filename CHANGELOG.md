@@ -3,6 +3,33 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.2.2 - 2026-09-04
+
+### Added
+
+- Add a clean-machine installation guide that distinguishes prebuilt release,
+  source-build, local marketplace, and future public HTTPS distribution paths.
+- Allowlist and safely extract, byte-compare, and smoke-test every final release
+  archive before it can leave its target build job.
+- Validate release archives through actual Codex local-marketplace installs and
+  plugin listings on clean macOS, Linux, and Windows runners.
+- Extend minimum-Rust validation to macOS and smoke-test release-mode local
+  plugin builds with Rust 1.88 on all three host operating systems.
+
+### Fixed
+
+- Clarify unavailable-output-parent diagnostics without changing the stable
+  error code or the workspace-relative output path returned to clients.
+- Document that generation requires an existing parent directory and that
+  planning does not check filesystem publication readiness.
+- Reject the Windows console device names `CONIN$` and `CONOUT$` in portable
+  relative paths and in the native Windows publication adapter.
+- Publish the output-parent contract in MCP server instructions, tool
+  descriptions, and JSON Schema field descriptions.
+- Isolate local source-install and quality-gate builds from shared Cargo output,
+  refuse to copy a stale binary after a failed build, and keep host proc-macro
+  dylibs loadable on macOS 27 with supported pre-1.98 Rust toolchains.
+
 ## 0.2.1 - 2026-08-30
 
 ### Fixed

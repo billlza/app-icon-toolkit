@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct IconSetRequest {
-    /// Absolute directory that contains every source and the requested output directory.
+    /// Existing absolute capability root used to resolve every source and the requested output path.
     workspace_root: String,
-    /// New output directory relative to `workspace_root`.
+    /// Workspace-relative output. Plan ignores publication readiness; generate requires an existing parent and absent output.
     output_directory: String,
     /// PNG source artwork paths relative to `workspace_root`.
     sources: IconSourcesRequest,
@@ -452,10 +452,31 @@ impl PublicationFailureContext {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use app_icon_domain::RelativePath;
     use app_icon_engine::EngineError;
 
     use super::ToolFailure;
+
+    #[test]
+    fn output_parent_failure_preserves_output_path_and_precise_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let error = EngineError::OutputParent {
+            path: RelativePath::new("missing/generated")?,
+            source: io::Error::new(io::ErrorKind::NotFound, "parent missing"),
+        };
+
+        assert_eq!(
+            serde_json::to_value(ToolFailure::engine(&error))?,
+            serde_json::json!({
+                "code": "OUTPUT_PARENT_UNAVAILABLE",
+                "message": "parent directory for output `missing/generated` is unavailable: parent missing",
+                "relative_path": "missing/generated"
+            })
+        );
+        Ok(())
+    }
 
     #[test]
     fn indeterminate_publication_failure_requires_reconciliation_before_retry() {

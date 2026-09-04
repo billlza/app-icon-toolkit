@@ -8,7 +8,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -57,3 +57,9 @@ unwrap_used = "deny"
 codegen-units = 1
 lto = "thin"
 strip = true
+
+# Rust versions before 1.98 can emit unloadable stripped proc-macro dylibs on
+# macOS 27. Keep host-side build dependencies intact; final binaries stay stripped.
+# Remove this override after the MSRV reaches 1.98; see rust-lang/rust#157750.
+[profile.release.build-override]
+strip = "none"

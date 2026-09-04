@@ -21,6 +21,7 @@ jobs:
       matrix: ${{ steps.targets.outputs.matrix }}
       toolchain: ${{ steps.targets.outputs.toolchain }}
       universal_verify_matrix: ${{ steps.targets.outputs.universal_verify_matrix }}
+      codex_install_matrix: ${{ steps.targets.outputs.codex_install_matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: targets
@@ -32,6 +33,7 @@ jobs:
             echo "matrix=$(python3 scripts/release_targets.py matrix)"
             echo "toolchain=$(python3 scripts/release_targets.py toolchain)"
             echo "universal_verify_matrix=$(python3 scripts/release_targets.py universal-verify-matrix)"
+            echo "codex_install_matrix=$(python3 scripts/release_targets.py codex-install-matrix)"
           } >> "$GITHUB_OUTPUT"
 
   quality:
@@ -73,7 +75,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        os: [macos-latest, ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -88,6 +90,21 @@ jobs:
           --all-targets --all-features
       - name: Test with minimum supported Rust
         run: cargo +1.88.0 test --locked --workspace --all-targets --all-features
+      - name: Build and smoke-test local plugin with minimum Rust on Unix
+        if: runner.os != 'Windows'
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        run: |
+          ./scripts/build-local.sh
+          python3 ./scripts/smoke-installed-plugin.py .
+      - name: Build and smoke-test local plugin with minimum Rust on Windows
+        if: runner.os == 'Windows'
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        shell: pwsh
+        run: |
+          ./scripts/build-local.ps1
+          python ./scripts/smoke-installed-plugin.py .
 
   build-assets:
     needs: release-plan
@@ -187,6 +204,48 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  verify-codex-install:
+    needs: [release-plan, build-assets]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-plan.outputs.codex_install_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download exact release archive from this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "app-icon-toolkit-${{ matrix.id }}" \
+            --dir release-assets
+      - name: Install pinned Codex host
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cat CODEX_HOST_TEST_VERSION)
+          npm install --global "@openai/codex@$version"
+      - name: Validate clean-machine Codex plugin installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="release-assets/app-icon-toolkit-${GITHUB_REF_NAME}-${{ matrix.id }}.${{ matrix.archive_format }}"
+          test -s "$archive"
+          ${{ matrix.python }} scripts/extract-release-package.py \
+            --plugin-root . \
+            --target "${{ matrix.id }}" \
+            --archive "$archive" \
+            --output codex-install
+          ${{ matrix.python }} scripts/check-codex-plugin-install.py \
+            codex-install/app-icon-toolkit
+
   verify-universal-intel:
     needs: [release-plan, build-assets]
     strategy:
@@ -214,8 +273,11 @@ jobs:
           set -euo pipefail
           archive="release-assets/app-icon-toolkit-${GITHUB_REF_NAME}-${{ matrix.id }}.tar.gz"
           test -s "$archive"
-          mkdir extracted
-          tar -xzf "$archive" -C extracted
+          python3 scripts/extract-release-package.py \
+            --plugin-root . \
+            --target "${{ matrix.id }}" \
+            --archive "$archive" \
+            --output extracted
           python3 scripts/check-release-binary.py \
             --plugin-root . \
             --target "${{ matrix.id }}" \
@@ -223,7 +285,7 @@ jobs:
           python3 scripts/smoke-installed-plugin.py extracted/app-icon-toolkit
 
   publish:
-    needs: [quality, policy, msrv, build-assets, verify-universal-intel]
+    needs: [quality, policy, msrv, build-assets, verify-codex-install, verify-universal-intel]
     runs-on: ubuntu-22.04
     permissions:
       actions: read

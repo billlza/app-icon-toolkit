@@ -77,7 +77,7 @@ impl Default for IconMcpServer {
 
 #[tool_router(router = tool_router)]
 impl IconMcpServer {
-    /// Validate PNG sources and return the exact artifact plan without writing files.
+    /// Validate sources and return the exact plan without writes or publication-readiness checks.
     #[tool(
         name = "plan_icon_set",
         annotations(
@@ -108,7 +108,7 @@ impl IconMcpServer {
             .map_err(|error| Json(Self::engine_failure(&error)))
     }
 
-    /// Create a complete icon set in a new output directory.
+    /// Create a complete icon set in a new output whose parent already exists.
     #[tool(
         name = "generate_icon_set",
         annotations(
@@ -148,7 +148,7 @@ impl IconMcpServer {
 #[tool_handler(
     router = self.tool_router,
     name = "app-icon-toolkit",
-    instructions = "Plan or create deterministic application icon assets from explicit PNG sources. Paths inside a job are relative to the absolute workspace_root, and generation never overwrites an existing output directory."
+    instructions = "Plan or create deterministic application icon assets from explicit PNG sources. Paths inside a job are relative to the absolute workspace_root. Planning does not inspect output publication readiness. Generation requires the output parent to exist and never overwrites an existing output directory."
 )]
 impl ServerHandler for IconMcpServer {}
 

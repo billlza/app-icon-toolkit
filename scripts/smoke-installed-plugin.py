@@ -482,6 +482,42 @@ def run_smoke(plugin_root: Path) -> None:
             if failure.get("code") != "OUTPUT_EXISTS":
                 raise RuntimeError(f"duplicate generation returned the wrong error: {failure}")
 
+            missing_parent_arguments = {
+                **arguments,
+                "output_directory": "missing/generated",
+            }
+            mcp.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "generate_icon_set",
+                        "arguments": missing_parent_arguments,
+                    },
+                }
+            )
+            missing_parent = mcp.response(5)
+            missing_parent_result = missing_parent.get("result")
+            if (
+                not isinstance(missing_parent_result, dict)
+                or missing_parent_result.get("isError") is not True
+            ):
+                raise RuntimeError(f"missing output parent did not fail: {missing_parent}")
+            parent_failure = structured_content(missing_parent)
+            if (
+                parent_failure.get("code") != "OUTPUT_PARENT_UNAVAILABLE"
+                or parent_failure.get("relative_path") != "missing/generated"
+            ):
+                raise RuntimeError(f"missing output parent lost its context: {parent_failure}")
+            parent_message = parent_failure.get("message")
+            if not isinstance(parent_message, str) or not parent_message.startswith(
+                "parent directory for output `missing/generated` is unavailable: "
+            ):
+                raise RuntimeError(f"missing output parent has an imprecise message: {parent_failure}")
+            if {path.name for path in workspace.iterdir()} != {"sources", "generated"}:
+                raise RuntimeError("missing output parent created unexpected workspace entries")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
