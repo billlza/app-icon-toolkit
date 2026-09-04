@@ -1,6 +1,6 @@
 # Release process
 
-This is the release runbook for v0.2.4 and later. A release passes through four
+This is the release runbook for v0.2.5 and later. A release passes through four
 separate trust domains. Do not collapse them into one “release succeeded”
 claim:
 
@@ -34,7 +34,7 @@ finish with no errors or warnings:
 ```
 
 Confirm that `CHANGELOG.md`, `.codex-plugin/plugin.json`, every Cargo workspace
-package, `Cargo.lock`, and the planned tag all identify v0.2.4. Treat
+package, `Cargo.lock`, and the planned tag all identify v0.2.5. Treat
 `scripts/release-targets.json` as the only release target inventory.
 
 GitHub immutable releases must already be enabled for the repository before
@@ -63,7 +63,7 @@ release happens to be newest:
 ```bash
 RELEASE_CHECKOUT='/absolute/path/to/the/clean/tagged/checkout'
 RELEASE_REPOSITORY='<owner>/<repository>'
-RELEASE_TAG='v0.2.4'
+RELEASE_TAG='v0.2.5'
 RELEASE_HEAD_SHA='<40-character-lowercase-tagged-commit-sha>'
 IDENTITY_SHA1='<40-character-uppercase-developer-id-fingerprint>'
 NOTARY_PROFILE='<existing-keychain-profile-name>'
@@ -78,6 +78,12 @@ credential-isolated hosted validation jobs.
 
 The annotated `v0.2.3` tag records a failed, unpublished workflow attempt. Do
 not delete, move, reuse, or finalize that tag or any artifact from its run.
+
+The annotated `v0.2.4` tag records a second unpublished attempt. Its Release
+workflow reached an empty Draft and local preparation completed, but the tagged
+finalizer could not resume that sealed asset set for the next documented phase.
+Preserve its tag, empty Draft, workflow attempts, artifacts, and local receipts.
+Do not delete, move, reuse, publish, or finalize any part of that attempt.
 
 ## 1. Freeze the annotated tag and source workflow attempt
 

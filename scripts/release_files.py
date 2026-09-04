@@ -6,12 +6,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 import stat
-from typing import BinaryIO, Iterator
+from typing import BinaryIO, Iterable, Iterator
 
 
 COPY_BUFFER_BYTES = 1024 * 1024
+MAX_EXACT_FILE_SET_ENTRIES = 256
 _WINDOWS = os.name == "nt"
 
 
@@ -110,6 +111,126 @@ def inspect_regular_file(
         require_single_link=require_single_link,
         require_nonempty=require_nonempty,
     )
+
+
+def verify_exact_regular_file_set(
+    directory: Path | str,
+    expected_names: Iterable[str],
+    *,
+    label: str,
+) -> None:
+    """Require one bounded directory to contain exactly the named stable files."""
+
+    if isinstance(expected_names, (str, bytes)):
+        raise ReleaseFileError(f"{label} expected names must be an iterable of names")
+    names: list[str] = []
+    for name in expected_names:
+        if len(names) >= MAX_EXACT_FILE_SET_ENTRIES:
+            raise ReleaseFileError(
+                f"{label} expected file set exceeds {MAX_EXACT_FILE_SET_ENTRIES} entries"
+            )
+        if (
+            not isinstance(name, str)
+            or name in {"", ".", ".."}
+            or "\x00" in name
+            or "/" in name
+            or "\\" in name
+            or PurePath(name).name != name
+        ):
+            raise ReleaseFileError(f"{label} contains an unsafe expected name: {name!r}")
+        names.append(name)
+    if not names:
+        raise ReleaseFileError(f"{label} expected file set must not be empty")
+    if len(set(names)) != len(names):
+        raise ReleaseFileError(f"{label} expected file set contains duplicate names")
+
+    absolute = absolute_path(directory)
+    try:
+        directory_metadata = os.lstat(absolute)
+    except OSError as error:
+        raise ReleaseFileError(f"cannot inspect {label} directory {absolute}: {error}") from error
+    if stat.S_ISLNK(directory_metadata.st_mode) or not stat.S_ISDIR(
+        directory_metadata.st_mode
+    ):
+        raise ReleaseFileError(
+            f"{label} directory must be an ordinary non-symlink directory: {absolute}"
+        )
+
+    entries: dict[str, os.stat_result] = {}
+    try:
+        with os.scandir(absolute) as scanned:
+            for entry in scanned:
+                if len(entries) >= MAX_EXACT_FILE_SET_ENTRIES:
+                    raise ReleaseFileError(
+                        f"{label} directory exceeds {MAX_EXACT_FILE_SET_ENTRIES} entries"
+                    )
+                entries[entry.name] = entry.stat(follow_symlinks=False)
+    except ReleaseFileError:
+        raise
+    except OSError as error:
+        raise ReleaseFileError(f"cannot scan {label} directory {absolute}: {error}") from error
+    expected = set(names)
+    actual = set(entries)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ReleaseFileError(
+            f"{label} mismatch; missing={missing}; extra={extra}"
+        )
+    invalid = sorted(
+        name
+        for name, metadata in entries.items()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+        )
+    )
+    if invalid:
+        raise ReleaseFileError(
+            f"{label} entries must be non-empty regular non-symlink single-link files: "
+            f"{invalid}"
+        )
+    for name in sorted(expected):
+        try:
+            inspect_regular_file(
+                absolute / name,
+                label=f"{label} entry {name!r}",
+                require_single_link=True,
+            )
+        except ReleaseFileError as error:
+            raise ReleaseFileError(
+                f"{label} entries must be non-empty regular non-symlink single-link "
+                f"files: [{name!r}]"
+            ) from error
+
+    try:
+        directory_after = os.lstat(absolute)
+    except OSError as error:
+        raise ReleaseFileError(
+            f"cannot re-inspect {label} directory {absolute}: {error}"
+        ) from error
+    before_identity = (
+        directory_metadata.st_dev,
+        directory_metadata.st_ino,
+        directory_metadata.st_mode,
+        directory_metadata.st_mtime_ns,
+        directory_metadata.st_ctime_ns,
+    )
+    after_identity = (
+        directory_after.st_dev,
+        directory_after.st_ino,
+        directory_after.st_mode,
+        directory_after.st_mtime_ns,
+        directory_after.st_ctime_ns,
+    )
+    if (
+        stat.S_ISLNK(directory_after.st_mode)
+        or not stat.S_ISDIR(directory_after.st_mode)
+        or after_identity != before_identity
+    ):
+        raise ReleaseFileError(
+            f"{label} directory changed while it was scanned: {absolute}"
+        )
 
 
 def _validated_regular_snapshot(

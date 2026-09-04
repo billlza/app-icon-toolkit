@@ -13,6 +13,34 @@ import release_finalization_core as core
 
 
 class ReleaseFinalizationCoreTests(FinalizationTestCase):
+    def test_receipt_verification_mode_never_creates_missing_state(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalizer-receipt-mode-") as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            path = root / "state.json"
+
+            with self.assertRaisesRegex(
+                core.FinalizationError,
+                "required existing receipt is missing",
+            ):
+                core.ensure_receipt(
+                    root,
+                    path.name,
+                    {"state": "sealed"},
+                    create_missing=False,
+                )
+            self.assertFalse(path.exists())
+
+            core.ensure_receipt(root, path.name, {"state": "sealed"})
+            before = path.read_bytes()
+            core.ensure_receipt(
+                root,
+                path.name,
+                {"state": "sealed"},
+                create_missing=False,
+            )
+            self.assertEqual(path.read_bytes(), before)
+
     def test_finalization_phase_contract_rejects_unknown_values(self) -> None:
         for phase in core.FINALIZATION_PHASES:
             with self.subTest(phase=phase):

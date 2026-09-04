@@ -210,7 +210,13 @@ class AuditedMacRunner:
         return result
 
 
-def ensure_receipt(root: Path, name: str, payload: dict[str, Any]) -> Path:
+def ensure_receipt(
+    root: Path,
+    name: str,
+    payload: dict[str, Any],
+    *,
+    create_missing: bool = True,
+) -> Path:
     """Publish one receipt or prove the existing receipt is byte-semantically equal."""
 
     try:
@@ -232,6 +238,8 @@ def ensure_receipt(root: Path, name: str, payload: dict[str, Any]) -> Path:
         if observed != normalized:
             raise FinalizationError(f"existing receipt differs from expected state: {path}")
         return path
+    if not create_missing:
+        raise FinalizationError(f"required existing receipt is missing: {path}")
     return write_receipt_no_replace(root, name, normalized)
 
 

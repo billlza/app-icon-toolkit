@@ -25,7 +25,7 @@ class DocumentationContractTests(unittest.TestCase):
         )
         readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
         install = (REPOSITORY_ROOT / "INSTALL.md").read_text(encoding="utf-8")
-        self.assertIn("v0.2.4 and later use Developer ID signing", readme)
+        self.assertIn("v0.2.5 and later use Developer ID signing", readme)
         self.assertIn("ditto -x -k", install)
         self.assertIn("cannot carry a stapled ticket", install)
         self.assertNotIn(

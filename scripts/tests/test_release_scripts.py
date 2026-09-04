@@ -380,9 +380,9 @@ class ReleaseTargetContractTests(unittest.TestCase):
                 (directory / target.release_filename(tag)).write_bytes(b"archive")
 
             release_targets.verify_release_assets(contract, directory, tag)
-            extra = directory / "unexpected.tar.gz"
+            extra = directory / "SHA256SUMS"
             extra.write_bytes(b"unexpected")
-            with self.assertRaisesRegex(RuntimeError, "extra=.*unexpected"):
+            with self.assertRaisesRegex(RuntimeError, "extra=.*SHA256SUMS"):
                 release_targets.verify_release_assets(contract, directory, tag)
 
             extra.unlink()

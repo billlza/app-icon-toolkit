@@ -43,7 +43,7 @@ names while adding new targets:
 
 | Host package | Runtime boundary |
 | --- | --- |
-| macOS ARM64, Intel, and Universal2 | macOS 13.0 or newer; v0.2.4 and later use Developer ID signing and Apple notarization |
+| macOS ARM64, Intel, and Universal2 | macOS 13.0 or newer; v0.2.5 and later use Developer ID signing and Apple notarization |
 | Linux x86_64 GNU | glibc 2.34 or newer, mechanically checked from the final ELF |
 | Linux x86_64 and ARM64 musl | native-tested static ELF with no interpreter or `NEEDED` library entries |
 | Windows x64 and ARM64 MSVC | native-tested executable with static UCRT/VCRuntime and no dynamic CRT imports |

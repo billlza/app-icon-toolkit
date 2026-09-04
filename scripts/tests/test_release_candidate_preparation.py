@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import tempfile
 from unittest import mock
 
 from finalization_test_support import FinalizationTestCase
 import release_attempt
 import release_candidate_preparation as candidate
+import release_draft
 import release_files
 import release_finalization_core as core
 import release_targets
@@ -18,38 +20,372 @@ macos_signing = candidate.macos_signing
 
 
 class ReleaseCandidatePreparationTests(FinalizationTestCase):
-    def test_prepare_assets_uses_the_shared_archive_mapping(self) -> None:
+    @staticmethod
+    def tree_snapshot(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
+        snapshot: list[tuple[str, str, bytes | None]] = []
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            if path.is_dir():
+                snapshot.append((relative, "directory", None))
+            else:
+                snapshot.append((relative, "file", path.read_bytes()))
+        return tuple(snapshot)
+
+    def non_macos_prepare_fixture(
+        self,
+        root: Path,
+    ) -> tuple[
+        Path,
+        Path,
+        core.FinalizationOptions,
+        release_targets.ReleaseContract,
+        str,
+    ]:
+        root.chmod(0o700)
+        attempt = root / "attempt"
+        attempt.mkdir(mode=0o700)
+        downloads = root / "downloads"
+        downloads.mkdir(mode=0o700)
+        options = self.options(root, attempt)
+        full_contract = release_targets.load_contract()
+        target = next(
+            item
+            for item in full_contract.targets
+            if item.family not in core.MACOS_FAMILIES
+        )
+        contract = release_targets.ReleaseContract(
+            release_toolchain=full_contract.release_toolchain,
+            macos_signing=full_contract.macos_signing,
+            targets=(target,),
+        )
+        archive_name = target.release_filename(options.binding.tag)
+        (downloads / archive_name).write_bytes(b"CI archive fixture")
+        return attempt, downloads, options, contract, archive_name
+
+    def sealed_macos_prepare_fixture(
+        self,
+        root: Path,
+        target_ids: tuple[str, ...],
+    ) -> tuple[
+        Path,
+        Path,
+        core.FinalizationOptions,
+        release_targets.ReleaseContract,
+        dict[str, Path],
+    ]:
+        root.chmod(0o700)
+        attempt = root / "attempt"
+        attempt.mkdir(mode=0o700)
+        (attempt / "assets").mkdir(mode=0o700)
+        work = attempt / "macos-work"
+        work.mkdir(mode=0o700)
+        downloads = root / "downloads"
+        downloads.mkdir(mode=0o700)
+        options = self.options(root, attempt)
+        full_contract = release_targets.load_contract()
+        targets = tuple(full_contract.target(target_id) for target_id in target_ids)
+        contract = release_targets.ReleaseContract(
+            release_toolchain=full_contract.release_toolchain,
+            macos_signing=full_contract.macos_signing,
+            targets=targets,
+        )
+        target_roots: dict[str, Path] = {}
+        for target in targets:
+            target_root = work / target.id
+            target_root.mkdir(mode=0o700)
+            (target_root / "candidate").mkdir(mode=0o700)
+            (target_root / "apple-command-receipts").mkdir(mode=0o700)
+            for name in (
+                "signing-intent.json",
+                "signing.json",
+                "archive.json",
+            ):
+                release_attempt.write_receipt_no_replace(
+                    target_root,
+                    name,
+                    {"state": name},
+                )
+            target_roots[target.id] = target_root
+        release_attempt.write_receipt_no_replace(
+            attempt,
+            "prepared.json",
+            candidate._prepared_receipt_payload(options, ()),
+        )
+        return attempt, downloads, options, contract, target_roots
+
+    def test_prepare_assets_resumes_the_complete_sealed_asset_set(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalizer-prepare-assets-") as temporary:
             root = Path(temporary)
+            attempt, downloads, options, contract, archive_name = (
+                self.non_macos_prepare_fixture(root)
+            )
+            assets, first_assets = candidate.prepare_assets(
+                options,
+                contract,
+                attempt,
+                downloads,
+                1_700_000_000,
+            )
+            checksum = assets / release_draft.CHECKSUM_ASSET_NAME
+            receipt = attempt / "prepared.json"
+            checksum_before = (
+                checksum.read_bytes(),
+                release_files.FileSnapshot.from_stat(checksum.stat()),
+            )
+            receipt_before = (
+                receipt.read_bytes(),
+                release_files.FileSnapshot.from_stat(receipt.stat()),
+            )
+
+            resumed_assets, second_assets = candidate.prepare_assets(
+                options,
+                contract,
+                attempt,
+                downloads,
+                1_700_000_000,
+            )
+
+            self.assertEqual(resumed_assets, assets)
+            self.assertEqual(second_assets, first_assets)
+            self.assertEqual(
+                tuple(asset.name for asset in second_assets),
+                ("SHA256SUMS", archive_name),
+            )
+            self.assertEqual(checksum.read_bytes(), checksum_before[0])
+            self.assertEqual(
+                release_files.FileSnapshot.from_stat(checksum.stat()),
+                checksum_before[1],
+            )
+            self.assertEqual(receipt.read_bytes(), receipt_before[0])
+            self.assertEqual(
+                release_files.FileSnapshot.from_stat(receipt.stat()),
+                receipt_before[1],
+            )
+
+    def test_sealed_receipt_helper_never_creates_missing_state(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalizer-sealed-receipt-") as temporary:
+            root = Path(temporary)
             root.chmod(0o700)
-            attempt = root / "attempt"
-            attempt.mkdir(mode=0o700)
-            downloads = root / "downloads"
-            downloads.mkdir(mode=0o700)
-            options = self.options(root, attempt)
-            full_contract = release_targets.load_contract()
-            target = next(
-                item
-                for item in full_contract.targets
-                if item.family not in core.MACOS_FAMILIES
+            receipt = root / "state.json"
+
+            with self.assertRaisesRegex(
+                core.FinalizationError,
+                "required existing receipt is missing",
+            ):
+                candidate._persist_or_verify_receipt(
+                    root,
+                    receipt.name,
+                    {"state": "sealed"},
+                    sealed=True,
+                )
+
+            self.assertFalse(receipt.exists())
+
+    def test_sealed_prepare_state_is_never_repaired(self) -> None:
+        mutations = ("extra", "missing-archive", "missing-checksum", "bad-checksum")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(
+                prefix="finalizer-sealed-prepare-"
+            ) as temporary:
+                root = Path(temporary)
+                attempt, downloads, options, contract, archive_name = (
+                    self.non_macos_prepare_fixture(root)
+                )
+                assets, _all_assets = candidate.prepare_assets(
+                    options,
+                    contract,
+                    attempt,
+                    downloads,
+                    1_700_000_000,
+                )
+                archive = assets / archive_name
+                checksum = assets / release_draft.CHECKSUM_ASSET_NAME
+                if mutation == "extra":
+                    (assets / "unexpected").write_bytes(b"unexpected")
+                elif mutation == "missing-archive":
+                    archive.unlink()
+                elif mutation == "missing-checksum":
+                    checksum.unlink()
+                else:
+                    checksum.write_bytes(b"incorrect checksum\n")
+
+                with mock.patch.object(
+                    candidate,
+                    "copy_regular_file",
+                    wraps=candidate.copy_regular_file,
+                ) as copy, mock.patch.object(
+                    release_draft,
+                    "generate_sha256sums",
+                    wraps=release_draft.generate_sha256sums,
+                ) as generate, self.assertRaises(core.FinalizationError):
+                    candidate.prepare_assets(
+                        options,
+                        contract,
+                        attempt,
+                        downloads,
+                        1_700_000_000,
+                    )
+
+                copy.assert_not_called()
+                generate.assert_not_called()
+                if mutation == "missing-archive":
+                    self.assertFalse(archive.exists())
+                if mutation == "missing-checksum":
+                    self.assertFalse(checksum.exists())
+                if mutation == "extra":
+                    self.assertTrue((assets / "unexpected").is_file())
+
+    def test_sealed_asset_deletion_after_preflight_is_never_repaired(self) -> None:
+        for mutation in ("archive", "checksum"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(
+                prefix="finalizer-sealed-race-"
+            ) as temporary:
+                root = Path(temporary)
+                attempt, downloads, options, contract, archive_name = (
+                    self.non_macos_prepare_fixture(root)
+                )
+                assets, _all_assets = candidate.prepare_assets(
+                    options,
+                    contract,
+                    attempt,
+                    downloads,
+                    1_700_000_000,
+                )
+                mutated_path = assets / (
+                    archive_name
+                    if mutation == "archive"
+                    else release_draft.CHECKSUM_ASSET_NAME
+                )
+                real_validate = candidate._validate_complete_prepared_assets
+                mutated = False
+
+                def validate_then_delete(*args, **kwargs):
+                    nonlocal mutated
+                    result = real_validate(*args, **kwargs)
+                    if not mutated:
+                        mutated = True
+                        mutated_path.unlink()
+                    return result
+
+                with mock.patch.object(
+                    candidate,
+                    "_validate_complete_prepared_assets",
+                    side_effect=validate_then_delete,
+                ), mock.patch.object(
+                    candidate,
+                    "copy_regular_file",
+                    wraps=candidate.copy_regular_file,
+                ) as copy, mock.patch.object(
+                    release_draft,
+                    "generate_sha256sums",
+                    wraps=release_draft.generate_sha256sums,
+                ) as generate, self.assertRaises(core.FinalizationError):
+                    candidate.prepare_assets(
+                        options,
+                        contract,
+                        attempt,
+                        downloads,
+                        1_700_000_000,
+                    )
+
+                self.assertTrue(mutated)
+                self.assertFalse(mutated_path.exists())
+                copy.assert_not_called()
+                generate.assert_not_called()
+
+    def test_sealed_macos_state_is_checked_before_target_processing(self) -> None:
+        mutations = (
+            "target-root",
+            "candidate",
+            "apple-command-receipts",
+            "signing-intent.json",
+            "signing.json",
+            "archive.json",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(
+                prefix="finalizer-sealed-macos-state-"
+            ) as temporary:
+                root = Path(temporary)
+                attempt, downloads, options, contract, target_roots = (
+                    self.sealed_macos_prepare_fixture(
+                        root,
+                        ("aarch64-apple-darwin",),
+                    )
+                )
+                target_root = target_roots["aarch64-apple-darwin"]
+
+                mutation_path = (
+                    target_root
+                    if mutation == "target-root"
+                    else target_root / mutation
+                )
+                if mutation_path.is_dir():
+                    shutil.rmtree(mutation_path)
+                else:
+                    mutation_path.unlink()
+                before = self.tree_snapshot(attempt)
+
+                with mock.patch.object(
+                    candidate,
+                    "_validate_complete_prepared_assets",
+                    return_value=(),
+                ), mock.patch.object(
+                    candidate,
+                    "extract_candidate",
+                ) as extract, mock.patch.object(
+                    candidate,
+                    "sign_candidate",
+                ) as sign, mock.patch.object(
+                    candidate,
+                    "_run_packager",
+                ) as package, self.assertRaises(core.FinalizationError):
+                    candidate.prepare_assets(
+                        options,
+                        contract,
+                        attempt,
+                        downloads,
+                        1_700_000_000,
+                    )
+
+                extract.assert_not_called()
+                sign.assert_not_called()
+                package.assert_not_called()
+                self.assertEqual(self.tree_snapshot(attempt), before)
+
+    def test_all_sealed_macos_targets_are_checked_before_the_first_target(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="finalizer-sealed-macos-preflight-"
+        ) as temporary:
+            root = Path(temporary)
+            attempt, downloads, options, contract, target_roots = (
+                self.sealed_macos_prepare_fixture(
+                    root,
+                    (
+                        "aarch64-apple-darwin",
+                        "x86_64-apple-darwin",
+                    ),
+                )
             )
-            contract = release_targets.ReleaseContract(
-                release_toolchain=full_contract.release_toolchain,
-                macos_signing=full_contract.macos_signing,
-                targets=(target,),
-            )
-            archive_name = target.release_filename(options.binding.tag)
-            (downloads / archive_name).write_bytes(b"CI archive fixture")
+            missing = target_roots["x86_64-apple-darwin"] / "archive.json"
+            missing.unlink()
+            before = self.tree_snapshot(attempt)
 
             with mock.patch.object(
                 candidate,
-                "verify_release_assets",
+                "_validate_complete_prepared_assets",
+                return_value=(),
             ), mock.patch.object(
                 candidate,
-                "archive_paths",
-                wraps=candidate.archive_paths,
-            ) as archive_mapping:
-                assets, all_assets = candidate.prepare_assets(
+                "extract_candidate",
+            ) as extract, mock.patch.object(
+                candidate,
+                "sign_candidate",
+            ) as sign, mock.patch.object(
+                candidate,
+                "_run_packager",
+            ) as package, self.assertRaises(core.FinalizationError):
+                candidate.prepare_assets(
                     options,
                     contract,
                     attempt,
@@ -57,14 +393,192 @@ class ReleaseCandidatePreparationTests(FinalizationTestCase):
                     1_700_000_000,
                 )
 
-            archive_mapping.assert_called_once_with(
-                assets,
-                contract,
-                options.binding.tag,
+            extract.assert_not_called()
+            sign.assert_not_called()
+            package.assert_not_called()
+            self.assertFalse(missing.exists())
+            self.assertEqual(self.tree_snapshot(attempt), before)
+
+    def test_unsealed_checksum_crash_window_resumes_without_rewriting(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalizer-checksum-crash-") as temporary:
+            root = Path(temporary)
+            attempt, downloads, options, contract, _archive_name = (
+                self.non_macos_prepare_fixture(root)
             )
+            real_ensure_receipt = candidate.ensure_receipt
+
+            def fail_before_prepared_receipt(root_path, name, payload):
+                if name == "prepared.json":
+                    raise core.FinalizationError("injected crash before prepared receipt")
+                return real_ensure_receipt(root_path, name, payload)
+
+            with mock.patch.object(
+                candidate,
+                "ensure_receipt",
+                side_effect=fail_before_prepared_receipt,
+            ), self.assertRaisesRegex(core.FinalizationError, "injected crash"):
+                candidate.prepare_assets(
+                    options,
+                    contract,
+                    attempt,
+                    downloads,
+                    1_700_000_000,
+                )
+
+            checksum = attempt / "assets" / release_draft.CHECKSUM_ASSET_NAME
+            checksum_before = (
+                checksum.read_bytes(),
+                release_files.FileSnapshot.from_stat(checksum.stat()),
+            )
+            self.assertFalse((attempt / "prepared.json").exists())
+
+            _assets, all_assets = candidate.prepare_assets(
+                options,
+                contract,
+                attempt,
+                downloads,
+                1_700_000_000,
+            )
+
+            self.assertEqual(checksum.read_bytes(), checksum_before[0])
             self.assertEqual(
-                tuple(asset.name for asset in all_assets),
-                ("SHA256SUMS", archive_name),
+                release_files.FileSnapshot.from_stat(checksum.stat()),
+                checksum_before[1],
+            )
+            self.assertTrue((attempt / "prepared.json").is_file())
+            self.assertEqual(len(all_assets), 2)
+
+    def test_sealed_candidate_cannot_be_reextracted_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalizer-sealed-candidate-") as temporary:
+            root = Path(temporary)
+            plugin, _contract, target, archive, target_root, _binary = self.fixture(root)
+            shutil.rmtree(target_root / "candidate")
+            options = self.options(plugin, root / "attempt")
+
+            with self.assertRaisesRegex(
+                core.FinalizationError,
+                "sealed candidate directory",
+            ):
+                candidate.extract_candidate(
+                    options,
+                    target,
+                    archive,
+                    target_root,
+                    sealed=True,
+                )
+
+            self.assertFalse((target_root / "candidate").exists())
+            self.assertFalse((target_root / "candidate.partial").exists())
+
+    def test_sealed_signing_state_cannot_be_recreated_when_missing(self) -> None:
+        for missing in ("signing-intent.json", "signing.json"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory(
+                prefix="finalizer-sealed-signing-"
+            ) as temporary:
+                root = Path(temporary)
+                plugin, contract, target, archive, target_root, binary = self.fixture(root)
+                options = self.options(plugin, root / "attempt")
+                for name in ("signing-intent.json", "signing.json"):
+                    release_attempt.write_receipt_no_replace(
+                        target_root,
+                        name,
+                        {"state": name},
+                    )
+                (target_root / missing).unlink()
+
+                with mock.patch.object(
+                    candidate,
+                    "check_release_binary",
+                ) as check, mock.patch.object(
+                    candidate,
+                    "ensure_receipt",
+                ) as receipt, mock.patch.object(
+                    macos_signing,
+                    "sign_and_verify",
+                ) as sign, self.assertRaises(core.FinalizationError):
+                    candidate.sign_candidate(
+                        options,
+                        contract,
+                        target,
+                        archive,
+                        target_root,
+                        binary,
+                        object(),
+                        sealed=True,
+                    )
+
+                check.assert_not_called()
+                receipt.assert_not_called()
+                sign.assert_not_called()
+                self.assertFalse((target_root / missing).exists())
+
+    def test_sealed_signing_receipt_deleted_after_preflight_never_resigns(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalizer-sealed-sign-race-") as temporary:
+            root = Path(temporary)
+            plugin, contract, target, archive, target_root, binary = self.fixture(root)
+            options = self.options(plugin, root / "attempt")
+            for name in ("signing-intent.json", "signing.json"):
+                release_attempt.write_receipt_no_replace(
+                    target_root,
+                    name,
+                    {"state": name},
+                )
+            signing_receipt = target_root / "signing.json"
+            binary_before = (
+                binary.read_bytes(),
+                release_files.FileSnapshot.from_stat(binary.stat()),
+            )
+            real_preflight = candidate._require_sealed_signing_state
+
+            def preflight_then_delete(*args, **kwargs):
+                real_preflight(*args, **kwargs)
+                signing_receipt.unlink()
+
+            with mock.patch.object(
+                candidate,
+                "_require_sealed_signing_state",
+                side_effect=preflight_then_delete,
+            ), mock.patch.object(
+                candidate,
+                "check_release_binary",
+            ), mock.patch.object(
+                candidate,
+                "candidate_binary_sha256",
+                return_value="a" * 64,
+            ), mock.patch.object(
+                candidate,
+                "sha256_file",
+                return_value="b" * 64,
+            ), mock.patch.object(
+                candidate,
+                "_persist_or_verify_receipt",
+            ), mock.patch.object(
+                macos_signing,
+                "verify_signed",
+            ) as verify, mock.patch.object(
+                macos_signing,
+                "sign_and_verify",
+            ) as sign, self.assertRaises(core.FinalizationError):
+                candidate.sign_candidate(
+                    options,
+                    contract,
+                    target,
+                    archive,
+                    target_root,
+                    binary,
+                    object(),
+                    sealed=True,
+                )
+
+            verify.assert_not_called()
+            sign.assert_not_called()
+            self.assertFalse(signing_receipt.exists())
+            self.assertEqual(
+                (
+                    binary.read_bytes(),
+                    release_files.FileSnapshot.from_stat(binary.stat()),
+                ),
+                binary_before,
             )
 
     def test_signed_candidate_resumes_without_treating_signed_bytes_as_input(self) -> None:
