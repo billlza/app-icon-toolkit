@@ -34,7 +34,7 @@ def main() -> None:
         raise SystemExit(f"refusing to use an existing extraction root: {output}")
     if not output.parent.is_dir():
         raise SystemExit(f"extraction parent does not exist: {output.parent}")
-    output.mkdir()
+    output.mkdir(mode=0o700)
 
     package_root = safe_extract_archive(
         arguments.archive,

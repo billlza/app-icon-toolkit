@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import signal
 import struct
 import subprocess
 import tempfile
@@ -17,8 +18,12 @@ import zlib
 
 
 PROTOCOL_VERSION = "2025-11-25"
+SERVER_NAME = "app-icon-toolkit"
 EXPECTED_ARTIFACTS = 101
 STDERR_CAPTURE_LIMIT = 64 * 1024
+STDOUT_LINE_LIMIT = 1024 * 1024
+STDOUT_TOTAL_LIMIT = 4 * 1024 * 1024
+PROTOCOL_MESSAGE_LIMIT = 64
 DIAGNOSTIC_OVERLAP = 64
 DISALLOWED_DIAGNOSTIC = re.compile(
     r"\b(?:WARN(?:ING)?|ERROR)(?=[:\s])|\b[A-Za-z]+Warning:|\[DEP[0-9]+\]",
@@ -50,6 +55,41 @@ def _require_inside_plugin(path: Path, plugin_root: Path, field: str) -> Path:
     return path
 
 
+def load_plugin_identity(plugin_root: Path) -> tuple[str, str]:
+    manifest_path = plugin_root / ".codex-plugin" / "plugin.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"failed to read plugin manifest {manifest_path}: {error}"
+        ) from error
+    if not isinstance(manifest, dict):
+        raise RuntimeError("plugin manifest must contain an object")
+    name = _require_string(manifest.get("name"), "plugin manifest name")
+    version = _require_string(manifest.get("version"), "plugin manifest version")
+    if name != SERVER_NAME:
+        raise RuntimeError(
+            f"plugin manifest name is {name!r}, expected {SERVER_NAME!r}"
+        )
+    return name, version
+
+
+def validate_server_identity(
+    server_info: object, expected_name: str, expected_version: str
+) -> None:
+    if not isinstance(server_info, dict):
+        raise RuntimeError("initialize omitted serverInfo")
+    actual = {
+        "name": server_info.get("name"),
+        "version": server_info.get("version"),
+    }
+    expected = {"name": expected_name, "version": expected_version}
+    if actual != expected:
+        raise RuntimeError(
+            f"MCP server identity is {actual!r}, expected {expected!r}"
+        )
+
+
 def resolve_packaged_server_process(
     plugin_root: Path, server: dict[str, object]
 ) -> tuple[list[str], Path]:
@@ -78,35 +118,40 @@ def resolve_packaged_server_process(
         "MCP server command",
     )
 
-    # Codex resolves this extensionless path against the configured cwd and uses
-    # PATHEXT on Windows. Materialize the package's known native suffix before
-    # Popen so no parent-process cwd or PATH entry can shadow the bundled binary.
-    executable_candidate = unresolved_command
-    if os.name == "nt" and not executable_candidate.suffix:
-        executable_candidate = executable_candidate.with_name(
-            f"{executable_candidate.name}.exe"
+    # CPython delegates a path-bearing command to CreateProcessW, which does not
+    # append .exe in this case. Materialize the native suffix for this Python
+    # wire smoke; a Rust integration test separately exercises the extensionless
+    # std::process::Command contract used by the Codex host.
+    executable_to_validate = unresolved_command
+    if os.name == "nt" and not executable_to_validate.suffix:
+        executable_to_validate = executable_to_validate.with_name(
+            f"{executable_to_validate.name}.exe"
         )
     try:
-        executable = _require_inside_plugin(
-            executable_candidate.resolve(strict=True),
+        validated_executable = _require_inside_plugin(
+            executable_to_validate.resolve(strict=True),
             plugin_root,
             "resolved MCP server command",
         )
     except FileNotFoundError as error:
         raise RuntimeError(
-            f"packaged MCP command does not exist: {executable_candidate}"
+            f"packaged MCP command does not exist: {executable_to_validate}"
         ) from error
-    if not executable.is_file():
-        raise RuntimeError(f"packaged MCP command is not a file: {executable}")
-    if os.name != "nt" and not os.access(executable, os.X_OK):
-        raise RuntimeError(f"packaged MCP command is not executable: {executable}")
+    if not validated_executable.is_file():
+        raise RuntimeError(
+            f"packaged MCP command is not a file: {validated_executable}"
+        )
+    if os.name != "nt" and not os.access(validated_executable, os.X_OK):
+        raise RuntimeError(
+            f"packaged MCP command is not executable: {validated_executable}"
+        )
 
     args_value = server.get("args", [])
     if not isinstance(args_value, list) or not all(
         isinstance(argument, str) for argument in args_value
     ):
         raise RuntimeError("MCP server args must be an array of strings")
-    return [str(executable), *args_value], working_directory
+    return [str(validated_executable), *args_value], working_directory
 
 
 def png_chunk(kind: bytes, data: bytes) -> bytes:
@@ -148,6 +193,7 @@ class McpProcess:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                start_new_session=os.name == "posix",
             )
         except OSError as error:
             raise RuntimeError(
@@ -157,6 +203,9 @@ class McpProcess:
             raise RuntimeError("MCP process did not expose stdio")
         if self._process.stderr is None:
             raise RuntimeError("MCP process did not expose stderr")
+        self._process_group_id = (
+            self._process.pid if os.name == "posix" else None
+        )
         self._start_readers()
 
     def _start_readers(self) -> None:
@@ -205,13 +254,28 @@ class McpProcess:
             self._messages.put(None)
             return
         try:
-            for raw_line in self._process.stdout:
+            total_bytes = 0
+            while True:
+                raw_line = self._process.stdout.readline(STDOUT_LINE_LIMIT + 1)
+                if not raw_line:
+                    break
+                try:
+                    line_bytes = len(raw_line.encode("utf-8", errors="strict"))
+                except UnicodeError as error:
+                    raise RuntimeError("MCP stdout is not valid UTF-8") from error
+                if line_bytes > STDOUT_LINE_LIMIT:
+                    raise RuntimeError("MCP stdout line exceeded the size limit")
+                total_bytes += line_bytes
+                if total_bytes > STDOUT_TOTAL_LIMIT:
+                    raise RuntimeError("MCP stdout exceeded the total size limit")
                 line = raw_line.rstrip("\r\n")
                 if not line:
                     continue
                 message = json.loads(line)
                 if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
                     raise RuntimeError(f"stdout contained a non-JSON-RPC message: {line}")
+                if len(self._seen) >= PROTOCOL_MESSAGE_LIMIT:
+                    raise RuntimeError("MCP stdout exceeded the protocol message limit")
                 self._seen.append(message)
                 self._messages.put(message)
         except BaseException as error:
@@ -297,13 +361,24 @@ class McpProcess:
                 issues.append(("inspect process after failed wait", error))
             if process_is_running:
                 try:
-                    self._process.kill()
+                    self._kill_process_tree()
                 except Exception as error:
                     issues.append(("kill process after failed wait", error))
             try:
                 return_code = self._process.wait(timeout=10)
             except Exception as error:
                 issues.append(("reap process after failed wait", error))
+
+        try:
+            if self._kill_residual_process_group():
+                issues.append(
+                    (
+                        "validate process tree",
+                        RuntimeError("MCP left descendant processes after shutdown"),
+                    )
+                )
+        except Exception as error:
+            issues.append(("clean residual process tree", error))
 
         for name, reader in (
             ("stdout", self._reader),
@@ -364,6 +439,24 @@ class McpProcess:
         if issues:
             raise McpProcessFailure(issues)
 
+    def _kill_process_tree(self) -> None:
+        process_group_id = getattr(self, "_process_group_id", None)
+        if process_group_id is None:
+            self._process.kill()
+            return
+        os.killpg(process_group_id, signal.SIGKILL)
+
+    def _kill_residual_process_group(self) -> bool:
+        process_group_id = getattr(self, "_process_group_id", None)
+        if process_group_id is None:
+            return False
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return False
+        os.killpg(process_group_id, signal.SIGKILL)
+        return True
+
 
 def structured_content(response: dict[str, object]) -> dict[str, object]:
     result = response.get("result")
@@ -403,6 +496,7 @@ def call_arguments(workspace: Path) -> dict[str, object]:
 
 
 def run_smoke(plugin_root: Path) -> None:
+    expected_name, expected_version = load_plugin_identity(plugin_root)
     with tempfile.TemporaryDirectory(prefix="app-icon-toolkit-smoke-") as temporary:
         workspace = Path(temporary)
         for name in ("flattened", "foreground", "background", "monochrome"):
@@ -428,6 +522,9 @@ def run_smoke(plugin_root: Path) -> None:
                 raise RuntimeError("initialize omitted result")
             if result.get("protocolVersion") != PROTOCOL_VERSION:
                 raise RuntimeError(f"unexpected protocol version: {result}")
+            validate_server_identity(
+                result.get("serverInfo"), expected_name, expected_version
+            )
 
             mcp.send(
                 {

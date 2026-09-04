@@ -1,6 +1,10 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "release_toolchain": "1.97.1",
+  "macos_signing": {
+    "team_id": "YKUPL7Z869",
+    "code_identifier": "io.github.billlza.app-icon-toolkit.mcp"
+  },
   "targets": [
     {
       "id": "x86_64-unknown-linux-gnu",
@@ -41,7 +45,7 @@
       "runner": "macos-26",
       "rust_targets": ["aarch64-apple-darwin"],
       "test_target": "aarch64-apple-darwin",
-      "archive_format": "tar.gz",
+      "archive_format": "zip",
       "binary_name": "app-icon-toolkit-mcp",
       "family": "macos",
       "python": "python3",
@@ -53,7 +57,7 @@
       "runner": "macos-26-intel",
       "rust_targets": ["x86_64-apple-darwin"],
       "test_target": "x86_64-apple-darwin",
-      "archive_format": "tar.gz",
+      "archive_format": "zip",
       "binary_name": "app-icon-toolkit-mcp",
       "family": "macos",
       "python": "python3",
@@ -65,7 +69,7 @@
       "runner": "macos-26",
       "rust_targets": ["aarch64-apple-darwin", "x86_64-apple-darwin"],
       "test_target": null,
-      "archive_format": "tar.gz",
+      "archive_format": "zip",
       "binary_name": "app-icon-toolkit-mcp",
       "family": "macos_universal2",
       "python": "python3",

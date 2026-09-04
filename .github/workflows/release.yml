@@ -17,6 +17,7 @@ env:
 jobs:
   release-plan:
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.targets.outputs.matrix }}
       toolchain: ${{ steps.targets.outputs.toolchain }}
@@ -24,6 +25,8 @@ jobs:
       codex_install_matrix: ${{ steps.targets.outputs.codex_install_matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: targets
         name: Load validated release target contract
         shell: bash
@@ -38,8 +41,11 @@ jobs:
 
   quality:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install Rust quality components
         run: rustup component add clippy rustfmt
       - name: Verify release version
@@ -59,8 +65,11 @@ jobs:
 
   policy:
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check advisories, licenses, and dependency sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
@@ -77,8 +86,11 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install minimum supported Rust
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check with minimum supported Rust
@@ -112,8 +124,11 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.release-plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify release version
         shell: bash
         run: ${{ matrix.python }} scripts/check-release-version.py "$GITHUB_REF_NAME"
@@ -196,13 +211,14 @@ jobs:
           --format "${{ matrix.archive_format }}"
           --output dist
           --source-date-epoch "${{ steps.source.outputs.epoch }}"
+          --verification-mode runtime-smoke
       - name: Upload release archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: app-icon-toolkit-${{ matrix.id }}
+          name: ${{ matrix.artifact_name }}-attempt-${{ github.run_attempt }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
   verify-codex-install:
     needs: [release-plan, build-assets]
@@ -210,11 +226,14 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.release-plan.outputs.codex_install_matrix) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download exact release archive from this run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -224,7 +243,7 @@ jobs:
           mkdir release-assets
           gh run download "$GITHUB_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "app-icon-toolkit-${{ matrix.id }}" \
+            --name "${{ matrix.artifact_name }}-attempt-${{ github.run_attempt }}" \
             --dir release-assets
       - name: Install pinned Codex host
         shell: bash
@@ -251,11 +270,14 @@ jobs:
     strategy:
       matrix: ${{ fromJSON(needs.release-plan.outputs.universal_verify_matrix) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
     permissions:
       actions: read
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download exact Universal2 archive from this run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -265,13 +287,13 @@ jobs:
           mkdir release-assets
           gh run download "$GITHUB_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "app-icon-toolkit-${{ matrix.id }}" \
+            --name "${{ matrix.artifact_name }}-attempt-${{ github.run_attempt }}" \
             --dir release-assets
       - name: Verify and smoke-test the same archive on Intel macOS
         shell: bash
         run: |
           set -euo pipefail
-          archive="release-assets/app-icon-toolkit-${GITHUB_REF_NAME}-${{ matrix.id }}.tar.gz"
+          archive="release-assets/app-icon-toolkit-${GITHUB_REF_NAME}-${{ matrix.id }}.${{ matrix.archive_format }}"
           test -s "$archive"
           python3 scripts/extract-release-package.py \
             --plugin-root . \
@@ -281,44 +303,27 @@ jobs:
           python3 scripts/check-release-binary.py \
             --plugin-root . \
             --target "${{ matrix.id }}" \
-            --binary extracted/app-icon-toolkit/bin/app-icon-toolkit-mcp
+            --binary "extracted/app-icon-toolkit/bin/${{ matrix.binary_name }}"
           python3 scripts/smoke-installed-plugin.py extracted/app-icon-toolkit
 
-  publish:
+  stage-draft:
     needs: [quality, policy, msrv, build-assets, verify-codex-install, verify-universal-intel]
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     permissions:
-      actions: read
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify release version
         run: python3 scripts/check-release-version.py "$GITHUB_REF_NAME"
-      - name: Download exact release archive set
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir release-assets
-          while IFS= read -r artifact; do
-            gh run download "$GITHUB_RUN_ID" \
-              --repo "$GITHUB_REPOSITORY" \
-              --name "$artifact" \
-              --dir release-assets
-          done < <(python3 scripts/release_targets.py artifact-names)
-          python3 scripts/release_targets.py verify-assets \
-            --directory release-assets \
-            --tag "$GITHUB_REF_NAME"
-      - name: Generate checksums
-        working-directory: release-assets
-        run: sha256sum app-icon-toolkit-* > SHA256SUMS
-      - name: Publish GitHub Release
+      - name: Create or reconcile the empty release draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release create "$GITHUB_REF_NAME"
-          release-assets/*
-          --verify-tag
-          --title "App Icon Toolkit $GITHUB_REF_NAME"
+          python3 scripts/stage-release-draft.py
+          --repository "$GITHUB_REPOSITORY"
+          --tag "$GITHUB_REF_NAME"
+          --head-sha "$GITHUB_SHA"
           --notes-file CHANGELOG.md

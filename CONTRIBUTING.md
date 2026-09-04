@@ -65,3 +65,22 @@ When dependencies change, regenerate notices and review the diff:
 
 Windows filesystem changes require a real Windows test run. Cross-compilation
 is useful for conditional-compilation coverage but is not runtime evidence.
+
+## Release changes
+
+Release changes must preserve the staged trust boundary. The tag workflow may
+build, test, retain attempt-bound candidates, and create an empty Draft, but it
+must not receive Developer ID or notarization credentials or publish assets.
+The local macOS finalizer must bind numeric Actions artifact and release IDs,
+must not execute downloaded candidates, and must persist intent before Apple or
+GitHub mutations. Signed runtime acceptance belongs to credential-isolated
+hosted macOS jobs on both processor architectures. A stable release is complete
+only after immutable publication and credential-free re-download of the exact
+numeric release and asset set.
+
+Do not rerun only a subset of a failed tag workflow and then mix artifacts from
+different attempts. Rerun all jobs so every candidate name carries the same
+`github.run_attempt`; the finalizer rejects partial-attempt sets. Do not move or
+reuse a release tag, replace a published asset, upload by tag-derived release
+identity, retry an outcome-unknown mutation, execute a candidate on the signing
+account, or put private signing material in GitHub Actions.

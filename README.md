@@ -29,10 +29,12 @@ Store submission. The temporary CI package exists solely to validate resource
 qualifiers and manifest references.
 
 The project does not claim support for Apple Icon Composer `.icon` authoring,
-Liquid Glass annotations, SVG input, editor-native project mutation, signing,
-notarization, or direct publication to an app store. Android adaptive layers
-must be supplied semantically; the tool does not guess them from a flattened
-image.
+Liquid Glass annotations, SVG input, editor-native project mutation, signing or
+notarizing generated application assets, or direct publication to an app
+store. Android adaptive layers must be supplied semantically; the tool does not
+guess them from a flattened image. This output boundary is separate from the
+Developer ID signing and notarization applied to the distributed macOS MCP
+executable itself.
 
 ## Prebuilt release coverage
 
@@ -41,15 +43,17 @@ names while adding new targets:
 
 | Host package | Runtime boundary |
 | --- | --- |
-| macOS ARM64, Intel, and Universal2 | macOS 13.0 or newer; binaries are currently unsigned and not notarized |
+| macOS ARM64, Intel, and Universal2 | macOS 13.0 or newer; v0.2.3 and later use Developer ID signing and Apple notarization |
 | Linux x86_64 GNU | glibc 2.34 or newer, mechanically checked from the final ELF |
 | Linux x86_64 and ARM64 musl | native-tested static ELF with no interpreter or `NEEDED` library entries |
 | Windows x64 and ARM64 MSVC | native-tested executable with static UCRT/VCRuntime and no dynamic CRT imports |
 
 Universal2 is built and smoke-tested on Apple silicon, then the exact same
-archive is downloaded and smoke-tested again on an Intel runner. Static linking
-does not promise compatibility with every kernel or filesystem; unsupported
-atomic rename primitives still fail explicitly.
+candidate archive is downloaded and smoke-tested again on an Intel runner.
+Signed macOS archives are subsequently tested on credential-isolated Apple
+silicon and Intel hosts before an immutable release can be published. Static
+linking does not promise compatibility with every kernel or filesystem;
+unsupported atomic rename primitives still fail explicitly.
 
 ## Install from source
 
@@ -177,8 +181,19 @@ and a locked release build. CI repeats the Rust gate on macOS, Linux, and
 Windows, proves a Rust 1.88 source build and installed-plugin smoke on all three,
 and builds every entry from the validated release-target contract with Rust
 1.97.1. Every final archive is unpacked and smoke-tested; representative macOS,
-Linux, and Windows archives are then installed and listed by a clean pinned
-Codex host, and the cached installed copy is smoke-tested again.
+Linux, and Windows archives are then installed in an isolated, credential-free
+Codex home using a pinned host version. The resolved MCP cache command is
+inspected and that independent cached copy is smoke-tested again.
+
+The tag workflow publishes no binaries directly. It retains attempt-bound,
+unsigned candidates and stages an empty Draft release. A trusted macOS
+finalizer binds the exact tag, commit, workflow run, numeric artifact IDs, and
+artifact digests; signs only the macOS executables; submits the exact final ZIPs
+for notarization; and uploads the complete asset set to that Draft. The signing
+host never executes a downloaded candidate. Credential-isolated hosted macOS
+jobs perform the signed runtime smoke tests before the Draft is made public.
+Publication requires repository release immutability, and the final gate reads
+the numeric release and every asset again without GitHub credentials.
 
 Native format checks use disposable generated fixtures:
 
