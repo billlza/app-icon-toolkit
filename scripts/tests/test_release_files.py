@@ -30,6 +30,120 @@ class ReleaseFileTests(unittest.TestCase):
             st_nlink=metadata.st_nlink,
         )
 
+    def test_exact_regular_file_set_accepts_only_the_named_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-file-set-") as temporary:
+            directory = Path(temporary)
+            (directory / "one.zip").write_bytes(b"one")
+            (directory / "two.tar.gz").write_bytes(b"two")
+
+            release_files.verify_exact_regular_file_set(
+                directory,
+                ("one.zip", "two.tar.gz"),
+                label="test asset set",
+            )
+
+            (directory / "unexpected").write_bytes(b"extra")
+            with self.assertRaisesRegex(
+                release_files.ReleaseFileError,
+                "extra=.*unexpected",
+            ):
+                release_files.verify_exact_regular_file_set(
+                    directory,
+                    ("one.zip", "two.tar.gz"),
+                    label="test asset set",
+                )
+
+    def test_exact_regular_file_set_rejects_directory_replacement(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-file-set-swap-") as temporary:
+            root = Path(temporary)
+            directory = root / "assets"
+            directory.mkdir()
+            (directory / "one.zip").write_bytes(b"original")
+            moved = root / "moved-assets"
+            real_scandir = os.scandir
+            swapped = False
+
+            def swap_after_open(path):
+                nonlocal swapped
+                scanned = real_scandir(path)
+                if not swapped:
+                    swapped = True
+                    directory.rename(moved)
+                    directory.mkdir()
+                    (directory / "one.zip").write_bytes(b"replacement")
+                return scanned
+
+            with mock.patch.object(
+                release_files.os,
+                "scandir",
+                side_effect=swap_after_open,
+            ), self.assertRaisesRegex(
+                release_files.ReleaseFileError,
+                "directory changed while it was scanned",
+            ):
+                release_files.verify_exact_regular_file_set(
+                    directory,
+                    ("one.zip",),
+                    label="test asset set",
+                )
+
+            self.assertTrue((moved / "one.zip").is_file())
+            self.assertEqual((directory / "one.zip").read_bytes(), b"replacement")
+
+    def test_exact_regular_file_set_rejects_missing_and_unsafe_names(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-file-set-missing-") as temporary:
+            directory = Path(temporary)
+            (directory / "one.zip").write_bytes(b"one")
+
+            with self.assertRaisesRegex(release_files.ReleaseFileError, "missing=.*two"):
+                release_files.verify_exact_regular_file_set(
+                    directory,
+                    ("one.zip", "two.zip"),
+                    label="test asset set",
+                )
+            for unsafe in ("../one.zip", "nested/one.zip", "nested\\one.zip"):
+                with self.subTest(unsafe=unsafe), self.assertRaisesRegex(
+                    release_files.ReleaseFileError,
+                    "unsafe expected name",
+                ):
+                    release_files.verify_exact_regular_file_set(
+                        directory,
+                        (unsafe,),
+                        label="test asset set",
+                    )
+
+    def test_exact_regular_file_set_rejects_non_regular_or_linked_entries(self) -> None:
+        mutations = ("empty", "directory", "hardlink", "symlink")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(
+                prefix="release-file-set-invalid-"
+            ) as temporary:
+                directory = Path(temporary)
+                source = directory / "source.zip"
+                source.write_bytes(b"source")
+                candidate = directory / "candidate.zip"
+                if mutation == "empty":
+                    candidate.write_bytes(b"")
+                elif mutation == "directory":
+                    candidate.mkdir()
+                elif mutation == "hardlink":
+                    os.link(source, candidate)
+                else:
+                    try:
+                        candidate.symlink_to(source.name)
+                    except OSError as error:
+                        self.skipTest(f"symlink creation is unavailable: {error}")
+
+                with self.assertRaisesRegex(
+                    release_files.ReleaseFileError,
+                    "non-empty regular non-symlink single-link",
+                ):
+                    release_files.verify_exact_regular_file_set(
+                        directory,
+                        ("source.zip", "candidate.zip"),
+                        label="test asset set",
+                    )
+
     def test_hash_rejects_ctime_change_even_when_size_and_mtime_match(self) -> None:
         with tempfile.TemporaryDirectory(prefix="release-file-hash-test-") as temporary:
             source = Path(temporary) / "source"

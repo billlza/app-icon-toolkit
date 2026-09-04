@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from release_files import verify_exact_regular_file_set
+
 
 CONTRACT_PATH = Path(__file__).with_name("release-targets.json")
 TARGET_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
@@ -432,22 +434,12 @@ def load_contract(path: Path = CONTRACT_PATH) -> ReleaseContract:
 def verify_release_assets(contract: ReleaseContract, directory: Path, tag: str) -> None:
     """Reject missing, extra, non-regular, or symlinked public release assets."""
 
-    if not directory.is_dir():
-        raise RuntimeError(f"release asset directory does not exist: {directory}")
     expected = {target.release_filename(tag) for target in contract.targets}
-    entries = list(directory.iterdir())
-    actual = {entry.name for entry in entries}
-    if actual != expected:
-        missing = sorted(expected - actual)
-        extra = sorted(actual - expected)
-        raise RuntimeError(f"release asset mismatch; missing={missing}; extra={extra}")
-    invalid = sorted(
-        entry.name
-        for entry in entries
-        if entry.is_symlink() or not entry.is_file() or entry.stat().st_size == 0
+    verify_exact_regular_file_set(
+        directory,
+        expected,
+        label="release asset set",
     )
-    if invalid:
-        raise RuntimeError(f"release assets must be non-empty regular non-symlink files: {invalid}")
 
 
 def _main() -> None:

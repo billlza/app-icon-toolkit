@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -15,7 +16,14 @@ import zipfile
 import macos_signing
 import release_draft
 from release_attempt import private_subdirectory
-from release_files import copy_regular_file, sha256_file
+from release_files import (
+    ReleaseFileError,
+    copy_regular_file,
+    inspect_regular_file,
+    open_stable_regular_file,
+    sha256_file,
+    verify_exact_regular_file_set,
+)
 from release_finalization_core import (
     AuditedMacRunner,
     FinalizationError,
@@ -32,7 +40,98 @@ from release_package import (
     recover_incomplete_extraction,
     safe_extract_archive,
 )
-from release_targets import ReleaseContract, ReleaseTarget, verify_release_assets
+from release_targets import ReleaseContract, ReleaseTarget
+
+
+def _prepared_receipt_payload(
+    options: FinalizationOptions,
+    assets: tuple[release_draft.LocalAsset, ...],
+) -> dict[str, Any]:
+    return {
+        "binding": asdict(options.binding),
+        "assets": [asdict(asset) | {"path": asset.path.name} for asset in assets],
+    }
+
+
+def _persist_or_verify_receipt(
+    root: Path,
+    name: str,
+    payload: dict[str, Any],
+    *,
+    sealed: bool,
+) -> Path:
+    if sealed:
+        return ensure_receipt(root, name, payload, create_missing=False)
+    return ensure_receipt(root, name, payload)
+
+
+def _require_exact_prepared_files(
+    directory: Path,
+    expected_names: tuple[str, ...],
+) -> None:
+    try:
+        verify_exact_regular_file_set(
+            directory,
+            expected_names,
+            label="prepared release asset set",
+        )
+    except ReleaseFileError as error:
+        raise FinalizationError("prepared release archive set is not exact") from error
+
+
+def _read_stable_checksum(path: Path, expected: bytes) -> bytes:
+    try:
+        with open_stable_regular_file(
+            path,
+            label="persisted SHA256SUMS",
+            require_single_link=True,
+        ) as (checksum, _snapshot):
+            return checksum.read(len(expected) + 1)
+    except (OSError, ReleaseFileError) as error:
+        raise FinalizationError(f"cannot read stable persisted SHA256SUMS: {error}") from error
+
+
+def _validate_complete_prepared_assets(
+    options: FinalizationOptions,
+    contract: ReleaseContract,
+    assets: Path,
+) -> tuple[release_draft.LocalAsset, ...]:
+    prepared_archives = archive_paths(assets, contract, options.binding.tag)
+    checksum_path = assets / release_draft.CHECKSUM_ASSET_NAME
+    all_paths = {**prepared_archives, checksum_path.name: checksum_path}
+    expected_names = tuple(sorted(all_paths))
+    _require_exact_prepared_files(assets, expected_names)
+
+    archive_assets = release_draft.snapshot_local_assets(
+        prepared_archives,
+        expected_names=tuple(sorted(prepared_archives)),
+    )
+    expected_checksum = release_draft.render_sha256sums(archive_assets)
+    if _read_stable_checksum(checksum_path, expected_checksum) != expected_checksum:
+        raise FinalizationError("persisted SHA256SUMS differs from prepared archives")
+
+    all_assets = release_draft.snapshot_local_assets(
+        all_paths,
+        expected_names=expected_names,
+    )
+    final_archive_assets = tuple(
+        asset
+        for asset in all_assets
+        if asset.name != release_draft.CHECKSUM_ASSET_NAME
+    )
+    final_checksum = next(
+        asset
+        for asset in all_assets
+        if asset.name == release_draft.CHECKSUM_ASSET_NAME
+    )
+    final_checksum_bytes = release_draft.render_sha256sums(final_archive_assets)
+    if (
+        final_checksum.size != len(final_checksum_bytes)
+        or final_checksum.sha256 != hashlib.sha256(final_checksum_bytes).hexdigest()
+    ):
+        raise FinalizationError("persisted SHA256SUMS changed during prepared validation")
+    _require_exact_prepared_files(assets, expected_names)
+    return all_assets
 
 
 def _validate_extracted_candidate(
@@ -116,6 +215,51 @@ def _candidate_directory(path: Path, *, label: str) -> None:
         raise FinalizationError(
             f"{label} must be a private owned directory with mode 0700: {path}"
         )
+
+
+def _require_state_file(path: Path, *, label: str) -> None:
+    try:
+        inspect_regular_file(
+            path,
+            label=label,
+            require_single_link=True,
+        )
+    except ReleaseFileError as error:
+        raise FinalizationError(f"sealed prepared state has invalid {label}: {path}") from error
+
+
+def _require_sealed_signing_state(
+    target_root: Path,
+    target: ReleaseTarget,
+) -> None:
+    for name in ("signing-intent.json", "signing.json"):
+        _require_state_file(
+            target_root / name,
+            label=f"{target.id} {name}",
+        )
+
+
+def _require_sealed_macos_target_state(
+    target_root: Path,
+    target: ReleaseTarget,
+) -> None:
+    _candidate_directory(
+        target_root,
+        label=f"sealed macOS work root for {target.id}",
+    )
+    _candidate_directory(
+        target_root / "candidate",
+        label=f"sealed candidate directory for {target.id}",
+    )
+    _candidate_directory(
+        target_root / "apple-command-receipts",
+        label=f"sealed command receipt directory for {target.id}",
+    )
+    _require_sealed_signing_state(target_root, target)
+    _require_state_file(
+        target_root / "archive.json",
+        label=f"{target.id} archive.json",
+    )
 
 
 def _fsync_candidate_directory(path: Path, *, label: str) -> None:
@@ -234,10 +378,21 @@ def extract_candidate(
     target: ReleaseTarget,
     archive: Path,
     target_root: Path,
+    *,
+    sealed: bool = False,
 ) -> tuple[Path, Path]:
     candidate = target_root / "candidate"
     partial = target_root / "candidate.partial"
     expected = expected_archive_members(target.binary_name)
+    if sealed:
+        _candidate_directory(
+            candidate,
+            label=f"sealed candidate directory for {target.id}",
+        )
+        if os.path.lexists(partial):
+            raise FinalizationError(
+                f"sealed prepared state contains candidate.partial for {target.id}"
+            )
     signing_state_exists = _candidate_signing_state_exists(target_root)
 
     if os.path.lexists(candidate):
@@ -261,7 +416,7 @@ def extract_candidate(
                     )
             return package, binary
         except FinalizationError:
-            if signing_state_exists:
+            if sealed or signing_state_exists:
                 raise
             try:
                 recover_incomplete_extraction(candidate, expected)
@@ -271,6 +426,10 @@ def extract_candidate(
                     f"incomplete candidate cannot be recovered safely: {target.id}: {error}"
                 ) from error
 
+    if sealed:
+        raise FinalizationError(
+            f"sealed prepared state is missing its candidate for {target.id}"
+        )
     if signing_state_exists:
         raise FinalizationError(
             f"candidate is missing after signing state was persisted: {target.id}"
@@ -351,7 +510,11 @@ def sign_candidate(
     target_root: Path,
     binary: Path,
     runner: AuditedMacRunner,
+    *,
+    sealed: bool = False,
 ) -> macos_signing.SignatureVerificationReceipt:
+    if sealed:
+        _require_sealed_signing_state(target_root, target)
     expected_architectures = target.macos_architectures()
     check_release_binary(options.plugin_root, target, binary)
     unsigned_sha256 = candidate_binary_sha256(options, target, candidate_archive)
@@ -369,10 +532,20 @@ def sign_candidate(
     }
     intent_path = target_root / "signing-intent.json"
     intent_existed = os.path.lexists(intent_path)
-    ensure_receipt(target_root, intent_path.name, intent)
+    _persist_or_verify_receipt(
+        target_root,
+        intent_path.name,
+        intent,
+        sealed=sealed,
+    )
     signing_receipt = target_root / "signing.json"
 
-    if os.path.lexists(signing_receipt):
+    if sealed:
+        _require_state_file(
+            signing_receipt,
+            label=f"{target.id} signing.json",
+        )
+    if sealed or os.path.lexists(signing_receipt):
         verification = macos_signing.verify_signed(
             binary,
             expected_architectures=expected_architectures,
@@ -381,10 +554,11 @@ def sign_candidate(
             team_id=contract.macos_signing.team_id,
             runner=runner,
         )
-        ensure_receipt(
+        _persist_or_verify_receipt(
             target_root,
             signing_receipt.name,
             _signature_payload(unsigned_sha256, verification),
+            sealed=sealed,
         )
         check_release_binary(options.plugin_root, target, binary)
         return verification
@@ -453,10 +627,11 @@ def sign_candidate(
             slices=signed.slices,
         )
 
-    ensure_receipt(
+    _persist_or_verify_receipt(
         target_root,
         signing_receipt.name,
         _signature_payload(unsigned_sha256, verification),
+        sealed=sealed,
     )
     check_release_binary(options.plugin_root, target, binary)
     return verification
@@ -535,8 +710,28 @@ def prepare_assets(
     downloads: Path,
     source_epoch: int,
 ) -> tuple[Path, tuple[release_draft.LocalAsset, ...]]:
-    assets = private_subdirectory(attempt_root, "assets")
-    work = private_subdirectory(attempt_root, "macos-work")
+    prepared_receipt = attempt_root / "prepared.json"
+    sealed = os.path.lexists(prepared_receipt)
+    assets_path = attempt_root / "assets"
+    work_path = attempt_root / "macos-work"
+    if sealed:
+        _candidate_directory(assets_path, label="sealed prepared asset directory")
+        _candidate_directory(work_path, label="sealed macOS work directory")
+        assets = assets_path
+        work = work_path
+        sealed_assets = _validate_complete_prepared_assets(options, contract, assets)
+        _persist_or_verify_receipt(
+            attempt_root,
+            "prepared.json",
+            _prepared_receipt_payload(options, sealed_assets),
+            sealed=True,
+        )
+        for target in contract.targets:
+            if target.family in MACOS_FAMILIES:
+                _require_sealed_macos_target_state(work / target.id, target)
+    else:
+        assets = private_subdirectory(attempt_root, "assets")
+        work = private_subdirectory(attempt_root, "macos-work")
 
     for target in contract.targets:
         name = target.release_filename(options.binding.tag)
@@ -548,6 +743,10 @@ def prepare_assets(
                 if sha256_file(destination, label=f"prepared archive {name}") != source_sha256:
                     raise FinalizationError(f"prepared non-macOS archive differs from CI: {name}")
             else:
+                if sealed:
+                    raise FinalizationError(
+                        f"sealed prepared state is missing archive {name}"
+                    )
                 copy_regular_file(
                     source,
                     destination,
@@ -556,10 +755,21 @@ def prepare_assets(
                 )
             continue
 
-        target_root = private_subdirectory(work, target.id)
-        audit = private_subdirectory(target_root, "apple-command-receipts")
+        if sealed:
+            target_root = work / target.id
+            _require_sealed_macos_target_state(target_root, target)
+            audit = target_root / "apple-command-receipts"
+        else:
+            target_root = private_subdirectory(work, target.id)
+            audit = private_subdirectory(target_root, "apple-command-receipts")
         runner = AuditedMacRunner(audit)
-        _package, binary = extract_candidate(options, target, source, target_root)
+        _package, binary = extract_candidate(
+            options,
+            target,
+            source,
+            target_root,
+            sealed=sealed,
+        )
         verification = sign_candidate(
             options,
             contract,
@@ -568,8 +778,13 @@ def prepare_assets(
             target_root,
             binary,
             runner,
+            sealed=sealed,
         )
         if not os.path.lexists(destination):
+            if sealed:
+                raise FinalizationError(
+                    f"sealed prepared state is missing archive {name}"
+                )
             _run_packager(options, target, binary, assets, source_epoch)
         validate_signed_archive(
             options,
@@ -579,7 +794,7 @@ def prepare_assets(
             verification.signed_sha256,
             runner,
         )
-        ensure_receipt(
+        _persist_or_verify_receipt(
             target_root,
             "archive.json",
             {
@@ -591,40 +806,36 @@ def prepare_assets(
                 ),
                 "signed_binary_sha256": verification.signed_sha256,
             },
+            sealed=sealed,
         )
 
-    try:
-        verify_release_assets(contract, assets, options.binding.tag)
-    except RuntimeError as error:
-        raise FinalizationError("prepared release archive set is not exact") from error
     prepared_archives = archive_paths(assets, contract, options.binding.tag)
+    checksum_path = assets / release_draft.CHECKSUM_ASSET_NAME
+    preliminary_names = tuple(sorted(prepared_archives))
+    checksum_exists = os.path.lexists(checksum_path)
+    if checksum_exists:
+        preliminary_names = tuple(sorted((*preliminary_names, checksum_path.name)))
+    _require_exact_prepared_files(assets, preliminary_names)
     archive_assets = release_draft.snapshot_local_assets(
         prepared_archives,
         expected_names=tuple(sorted(prepared_archives)),
     )
-    checksum_path = assets / release_draft.CHECKSUM_ASSET_NAME
     expected_checksum = release_draft.render_sha256sums(archive_assets)
-    if os.path.lexists(checksum_path):
-        try:
-            with checksum_path.open("rb") as checksum:
-                actual_checksum = checksum.read(len(expected_checksum) + 1)
-        except OSError as error:
-            raise FinalizationError(f"cannot read persisted SHA256SUMS: {error}") from error
+    if checksum_exists:
+        actual_checksum = _read_stable_checksum(checksum_path, expected_checksum)
         if actual_checksum != expected_checksum:
             raise FinalizationError("persisted SHA256SUMS differs from prepared archives")
     else:
+        if sealed:
+            raise FinalizationError(
+                "sealed prepared state is missing its SHA256SUMS asset"
+            )
         release_draft.generate_sha256sums(archive_assets, checksum_path)
-    all_paths = {**prepared_archives, checksum_path.name: checksum_path}
-    all_assets = release_draft.snapshot_local_assets(
-        all_paths,
-        expected_names=tuple(sorted(all_paths)),
-    )
-    ensure_receipt(
+    all_assets = _validate_complete_prepared_assets(options, contract, assets)
+    _persist_or_verify_receipt(
         attempt_root,
         "prepared.json",
-        {
-            "binding": asdict(options.binding),
-            "assets": [asdict(asset) | {"path": asset.path.name} for asset in all_assets],
-        },
+        _prepared_receipt_payload(options, all_assets),
+        sealed=sealed,
     )
     return assets, all_assets

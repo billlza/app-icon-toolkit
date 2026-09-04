@@ -3,6 +3,17 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.2.5 - 2026-09-05
+
+### Fixed
+
+- Resume the documented local `prepare`, `notarize`, `stage`, and `publish`
+  phases from one sealed asset set while continuing to reject missing, extra,
+  linked, empty, or changed release files before any later external mutation.
+- Preserve the failed, unpublished v0.2.4 finalization attempt and its empty
+  Draft while starting v0.2.5 from a new commit, tag, workflow run, artifact
+  set, and local attempt root.
+
 ## 0.2.4 - 2026-09-04
 
 ### Fixed

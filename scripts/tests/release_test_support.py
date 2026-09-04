@@ -51,8 +51,8 @@ def load_script(module_name: str, filename: str):
     return module
 
 
-release_targets = load_script("release_targets", "release_targets.py")
 release_files = load_script("release_files", "release_files.py")
+release_targets = load_script("release_targets", "release_targets.py")
 release_zip_preflight = load_script(
     "release_zip_preflight",
     "release_zip_preflight.py",
