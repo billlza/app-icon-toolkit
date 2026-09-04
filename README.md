@@ -53,7 +53,11 @@ atomic rename primitives still fail explicitly.
 
 ## Install from source
 
-Rust 1.88 or newer is required.
+For a prebuilt, checksum-verified installation on a new account or computer,
+follow [INSTALL.md](INSTALL.md). Each local installation is available to new
+Codex tasks and does not depend on this development task or its plugin cache.
+
+Rust 1.88 or newer is required for a source installation.
 
 On macOS or Linux:
 
@@ -75,10 +79,10 @@ codex plugin marketplace add (Get-Location).Path
 codex plugin add app-icon-toolkit@app-icon-toolkit
 ```
 
-Release archives contain the same plugin layout with a prebuilt binary. After
-extracting an archive, add its root as the local marketplace and install the
-plugin with the same two `codex plugin` commands. Start a new task after
-installation so the host discovers the MCP tools.
+Release archives contain the same plugin layout with a prebuilt binary. Direct
+Git marketplace installation is not supported because platform binaries are
+not committed; build a checkout first or use a release archive. Start a new
+task after installation so the host discovers the MCP tools.
 
 ## MCP workflow
 
@@ -89,6 +93,12 @@ The server exposes two tools:
 2. `generate_icon_set` independently replans the job, renders into sibling
    staging, validates every generated file, and atomically publishes a new
    output directory.
+
+Planning validates sources and the artifact plan, not filesystem publication
+readiness. For an output such as `icons/generated`, create the parent `icons`
+first and leave `icons/generated` absent. Generation reports
+`OUTPUT_PARENT_UNAVAILABLE` if the parent cannot be accessed; its `relative_path`
+continues to identify the requested output (`icons/generated`), not the parent.
 
 Generate operations are deliberately serialized. A concurrent MCP generation
 request returns a structured `BUSY` error instead of joining an unbounded
@@ -110,8 +120,9 @@ retry.
 - Inputs must be regular, single-frame PNG files no larger than 64 MiB or 4096
   pixels per edge. The flattened master must be at least 1024×1024; Android
   adaptive layers must be at least 432×432.
-- The output directory must not already exist. There is no overwrite, merge,
-  backup, or copy/delete fallback.
+- The output directory must not already exist, and its parent directory must
+  already exist. Generation does not create missing parents. There is no
+  overwrite, merge, backup, or copy/delete fallback.
 - Files use exclusive creation inside staging, are synchronized and read back,
   and are decoded again before publication.
 - Any failure after staging creation preserves the hidden sibling directory and
@@ -163,8 +174,11 @@ Install `cargo-deny` and `cargo-about`, then run:
 The gate checks formatting, Clippy with warnings denied, all tests, rustdoc with
 warnings denied, RustSec/license/source policy, generated third-party notices,
 and a locked release build. CI repeats the Rust gate on macOS, Linux, and
-Windows, proves Rust 1.88 compatibility on Linux and Windows, and builds every
-entry from the validated release-target contract with Rust 1.97.1.
+Windows, proves a Rust 1.88 source build and installed-plugin smoke on all three,
+and builds every entry from the validated release-target contract with Rust
+1.97.1. Every final archive is unpacked and smoke-tested; representative macOS,
+Linux, and Windows archives are then installed and listed by a clean pinned
+Codex host, and the cached installed copy is smoke-tested again.
 
 Native format checks use disposable generated fixtures:
 
@@ -181,6 +195,7 @@ runs all portable profiles on suitable hosts; Windows runners additionally use
 ## Project policies
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) describes development and review gates.
+- [INSTALL.md](INSTALL.md) documents clean-machine and cross-account installation.
 - [SECURITY.md](SECURITY.md) defines the threat model and reporting process.
 - [CHANGELOG.md](CHANGELOG.md) records user-visible changes.
 - [THIRD_PARTY_LICENSES.html](THIRD_PARTY_LICENSES.html) contains dependency

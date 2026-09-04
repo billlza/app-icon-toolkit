@@ -112,14 +112,42 @@ exclusive staging-name allocation.
 `scripts/release-targets.json` is the single release target inventory. Its
 strict loader feeds the CI and release matrices, packaging allowlist, installed
 binary names, expected public assets, license targets, architecture checks, and
-the Intel verifier for Universal2. Thin target identifiers must equal Rust
-triples; Universal2 is an explicit synthetic identifier with two Rust slices.
+the Intel verifier for Universal2. It also selects one native archive per host
+operating system for clean Codex installation checks. Thin target identifiers
+must equal Rust triples; Universal2 is an explicit synthetic identifier with
+two Rust slices.
 
 Release builds use one pinned Rust toolchain in an isolated Cargo target
 directory. Final binaries are checked, not inferred from build flags: PE
 machine and CRT imports, ELF machine and glibc ceiling or static-musl entries,
 and Mach-O slices plus per-slice deployment minimum. Candidate publication uses
 a complete sibling temporary file and an atomic no-replace hard link.
+
+Local source-install builds and the complete local quality gate also use an
+invocation-private Cargo target directory. This prevents another toolchain or
+concurrent gate from supplying a stale build artifact. Release-mode host build
+dependencies are not stripped because supported Rust versions before 1.98 can
+otherwise produce unloadable proc-macro dylibs on macOS 27; final plugin
+executables remain stripped.
+
+Every public archive is the complete portable local-plugin unit: manifest,
+marketplace metadata, documentation, and one target binary. Packaging extracts
+the final archive through a shared bounded allowlist extractor before comparing
+the complete file set and bytes with the source package and running the real
+stdio smoke test. The extractor validates all names, types, modes, counts, and
+declared sizes before writing a member; tar members are rejected before seeking
+past an oversized payload. Native macOS, GNU Linux, and Windows x64 candidates
+also pass an actual local-marketplace install and plugin-listing gate on fresh
+Codex hosts. A Git tree is a source distribution and intentionally contains no
+platform binary; it must be built before local marketplace registration.
+
+The local stdio adapter and a future public HTTPS adapter are separate
+capability boundaries. `workspace_root` grants the local process filesystem
+access and cannot be forwarded meaningfully to a remote service. A hosted
+adapter must instead accept bounded uploaded objects and return downloadable
+artifacts, with explicit tenant isolation, quotas, cancellation, and retention.
+It may reuse the domain, planning, rendering, and validation layers but must not
+add network or multi-tenant concerns to the local engine.
 
 ## Compatibility policy
 

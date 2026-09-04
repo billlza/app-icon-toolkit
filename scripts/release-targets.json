@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "release_toolchain": "1.97.1",
   "targets": [
     {
@@ -11,6 +11,7 @@
       "binary_name": "app-icon-toolkit-mcp",
       "family": "linux_gnu",
       "python": "python3",
+      "codex_install_verify": true,
       "glibc_max": "2.34"
     },
     {
@@ -21,7 +22,8 @@
       "archive_format": "tar.gz",
       "binary_name": "app-icon-toolkit-mcp",
       "family": "linux_musl",
-      "python": "python3"
+      "python": "python3",
+      "codex_install_verify": false
     },
     {
       "id": "aarch64-unknown-linux-musl",
@@ -31,7 +33,8 @@
       "archive_format": "tar.gz",
       "binary_name": "app-icon-toolkit-mcp",
       "family": "linux_musl",
-      "python": "python3"
+      "python": "python3",
+      "codex_install_verify": false
     },
     {
       "id": "aarch64-apple-darwin",
@@ -42,6 +45,7 @@
       "binary_name": "app-icon-toolkit-mcp",
       "family": "macos",
       "python": "python3",
+      "codex_install_verify": true,
       "macos_minimum": "13.0"
     },
     {
@@ -53,6 +57,7 @@
       "binary_name": "app-icon-toolkit-mcp",
       "family": "macos",
       "python": "python3",
+      "codex_install_verify": false,
       "macos_minimum": "13.0"
     },
     {
@@ -64,6 +69,7 @@
       "binary_name": "app-icon-toolkit-mcp",
       "family": "macos_universal2",
       "python": "python3",
+      "codex_install_verify": false,
       "macos_minimum": "13.0",
       "native_verify_runner": "macos-26-intel"
     },
@@ -75,7 +81,8 @@
       "archive_format": "zip",
       "binary_name": "app-icon-toolkit-mcp.exe",
       "family": "windows_msvc",
-      "python": "python"
+      "python": "python",
+      "codex_install_verify": true
     },
     {
       "id": "aarch64-pc-windows-msvc",
@@ -85,7 +92,8 @@
       "archive_format": "zip",
       "binary_name": "app-icon-toolkit-mcp.exe",
       "family": "windows_msvc",
-      "python": "python"
+      "python": "python",
+      "codex_install_verify": false
     }
   ]
 }

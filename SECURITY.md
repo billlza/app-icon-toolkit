@@ -75,5 +75,11 @@ including MakePri and MakeAppx for the generated MSIX resource matrix. The MCP
 runtime itself still invokes no subprocess and accepts no package manifest or
 executable from a project.
 
+Release archive verification accepts only the exact packaged file allowlist,
+ordinary files, fixed permission modes, and bounded member and total sizes. It
+rejects duplicate, traversal, link, sparse, encrypted, oversized, missing, or
+extra members before extraction. The same extractor is used after artifact
+download by clean-host installation and Universal2 verification jobs.
+
 No network service, authentication secret, telemetry, subprocess invocation,
 or project-provided executable is part of the MCP runtime.

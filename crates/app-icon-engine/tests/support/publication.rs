@@ -92,6 +92,21 @@ fn existing_file_at_output_path_is_preserved() -> TestResult {
 }
 
 #[test]
+fn planning_does_not_require_or_create_the_output_parent() -> TestResult {
+    let workspace = tempdir()?;
+    create_sources(workspace.path())?;
+    let before = snapshot_files(workspace.path())?;
+    let job = all_target_job("missing/generated")?;
+
+    let plan = IconService::new().plan(workspace.path(), &job)?;
+
+    assert_eq!(plan.output_directory().as_str(), "missing/generated");
+    assert_eq!(snapshot_files(workspace.path())?, before);
+    assert!(!workspace.path().join("missing").exists());
+    Ok(())
+}
+
+#[test]
 fn missing_output_parent_fails_without_creating_any_path() -> TestResult {
     let workspace = tempdir()?;
     create_sources(workspace.path())?;
@@ -104,8 +119,47 @@ fn missing_output_parent_fails_without_creating_any_path() -> TestResult {
         .err()
         .ok_or_else(|| io::Error::other("generation unexpectedly created a missing parent"))?;
     assert_eq!(error.code(), "OUTPUT_PARENT_UNAVAILABLE");
+    assert_eq!(
+        error.relative_path().map(|path| path.as_str()),
+        Some("missing/generated")
+    );
+    assert!(
+        error
+            .message()
+            .starts_with("parent directory for output `missing/generated` is unavailable: ")
+    );
     assert_eq!(snapshot_files(workspace.path())?, before);
     assert!(!workspace.path().join("missing").exists());
+    Ok(())
+}
+
+#[test]
+fn file_at_output_parent_is_preserved_with_output_path_context() -> TestResult {
+    let workspace = tempdir()?;
+    create_sources(workspace.path())?;
+    fs::write(workspace.path().join("parent-file"), b"do not replace")?;
+    let before = snapshot_files(workspace.path())?;
+
+    let error = IconService::new()
+        .generate(workspace.path(), &all_target_job("parent-file/generated")?)
+        .err()
+        .ok_or_else(|| io::Error::other("generation unexpectedly used a file as its parent"))?;
+
+    assert_eq!(error.code(), "OUTPUT_PARENT_UNAVAILABLE");
+    assert_eq!(
+        error.relative_path().map(|path| path.as_str()),
+        Some("parent-file/generated")
+    );
+    assert!(
+        error
+            .message()
+            .starts_with("parent directory for output `parent-file/generated` is unavailable: ")
+    );
+    assert_eq!(snapshot_files(workspace.path())?, before);
+    assert_eq!(
+        fs::read(workspace.path().join("parent-file"))?,
+        b"do not replace"
+    );
     Ok(())
 }
 

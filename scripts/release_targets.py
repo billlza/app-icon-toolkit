@@ -26,6 +26,7 @@ TARGET_FIELDS = frozenset(
         "binary_name",
         "family",
         "python",
+        "codex_install_verify",
         "glibc_max",
         "macos_minimum",
         "native_verify_runner",
@@ -48,6 +49,7 @@ class ReleaseTarget:
     binary_name: str
     family: str
     python: str
+    codex_install_verify: bool
     glibc_max: str | None = None
     macos_minimum: str | None = None
     native_verify_runner: str | None = None
@@ -75,6 +77,7 @@ class ReleaseTarget:
             "binary_name": self.binary_name,
             "family": self.family,
             "python": self.python,
+            "codex_install_verify": self.codex_install_verify,
             "native_verify_runner": self.native_verify_runner or "",
         }
 
@@ -116,6 +119,12 @@ def _optional_string(value: Any, context: str) -> str | None:
     if value is None:
         return None
     return _expect_string(value, context)
+
+
+def _expect_bool(value: Any, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise RuntimeError(f"{context} must be a boolean")
+    return value
 
 
 def _parse_target(raw_value: Any, index: int) -> ReleaseTarget:
@@ -166,6 +175,9 @@ def _parse_target(raw_value: Any, index: int) -> ReleaseTarget:
         binary_name=_expect_string(raw["binary_name"], f"{context}.binary_name"),
         family=family,
         python=_expect_string(raw["python"], f"{context}.python"),
+        codex_install_verify=_expect_bool(
+            raw["codex_install_verify"], f"{context}.codex_install_verify"
+        ),
         glibc_max=_optional_string(raw.get("glibc_max"), f"{context}.glibc_max"),
         macos_minimum=_optional_string(
             raw.get("macos_minimum"), f"{context}.macos_minimum"
@@ -251,6 +263,16 @@ def _validate_target_relationships(target: ReleaseTarget, context: str) -> None:
         raise RuntimeError(f"{context}.python does not match its runner operating system")
 
 
+def _host_operating_system(family: str) -> str:
+    if family.startswith("linux_"):
+        return "linux"
+    if family.startswith("macos"):
+        return "macos"
+    if family == "windows_msvc":
+        return "windows"
+    raise AssertionError(f"unhandled validated release family: {family}")
+
+
 def load_contract(path: Path = CONTRACT_PATH) -> ReleaseContract:
     """Read and strictly validate the JSON release contract."""
 
@@ -265,8 +287,8 @@ def load_contract(path: Path = CONTRACT_PATH) -> ReleaseContract:
         raise RuntimeError(f"release target contract has unknown fields: {sorted(unknown)}")
     if missing:
         raise RuntimeError(f"release target contract is missing fields: {sorted(missing)}")
-    if raw["schema_version"] != 1:
-        raise RuntimeError("release target contract schema_version must be 1")
+    if raw["schema_version"] != 2:
+        raise RuntimeError("release target contract schema_version must be 2")
     toolchain = _expect_string(raw["release_toolchain"], "release_toolchain")
     if TOOLCHAIN.fullmatch(toolchain) is None:
         raise RuntimeError("release_toolchain must be an exact stable Rust version")
@@ -280,6 +302,16 @@ def load_contract(path: Path = CONTRACT_PATH) -> ReleaseContract:
     artifact_names = [target.artifact_name for target in targets]
     if len(set(artifact_names)) != len(artifact_names):
         raise RuntimeError("release target contract contains duplicate artifact names")
+    verified_operating_systems = sorted(
+        _host_operating_system(target.family)
+        for target in targets
+        if target.codex_install_verify
+    )
+    if verified_operating_systems != ["linux", "macos", "windows"]:
+        raise RuntimeError(
+            "clean Codex install verification must select exactly one target each "
+            "for Linux, macOS, and Windows"
+        )
     return ReleaseContract(release_toolchain=toolchain, targets=targets)
 
 
@@ -310,6 +342,7 @@ def _main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("matrix")
     subparsers.add_parser("universal-verify-matrix")
+    subparsers.add_parser("codex-install-matrix")
     subparsers.add_parser("toolchain")
     subparsers.add_parser("artifact-names")
     subparsers.add_parser("rust-targets")
@@ -339,6 +372,15 @@ def _main() -> None:
             raise RuntimeError(
                 f"expected exactly one cross-architecture native verifier; found {len(entries)}"
             )
+        print(json.dumps({"include": entries}, separators=(",", ":"), sort_keys=True))
+    elif arguments.command == "codex-install-matrix":
+        entries = [
+            target.matrix_entry()
+            for target in contract.targets
+            if target.codex_install_verify
+        ]
+        if not entries:
+            raise RuntimeError("expected at least one clean Codex installation target")
         print(json.dumps({"include": entries}, separators=(",", ":"), sort_keys=True))
     elif arguments.command == "toolchain":
         print(contract.release_toolchain)

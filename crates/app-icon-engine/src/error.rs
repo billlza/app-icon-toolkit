@@ -109,10 +109,10 @@ pub enum EngineError {
         path: RelativePath,
     },
 
-    /// The requested output parent cannot be opened as a capability directory.
-    #[error("failed to open output parent `{path}`: {source}")]
+    /// The output's parent cannot be opened or used for namespace inspection.
+    #[error("parent directory for output `{path}` is unavailable: {source}")]
     OutputParent {
-        /// Workspace-relative output parent.
+        /// Intended output directory, relative to the workspace.
         path: RelativePath,
         /// Operating-system failure.
         source: io::Error,
