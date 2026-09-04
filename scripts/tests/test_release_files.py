@@ -150,6 +150,41 @@ class ReleaseFileTests(unittest.TestCase):
                         release_files.FileSnapshot.from_stat(named),
                     )
 
+    def test_windows_stable_open_requires_cross_channel_size_agreement(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-file-windows-size-") as temporary:
+            source = Path(temporary) / "source"
+            source.write_bytes(b"payload")
+            named = os.lstat(source)
+            opened = mock.Mock(
+                st_mode=named.st_mode,
+                st_ino=named.st_ino + 1,
+                st_dev=named.st_dev + 1,
+                st_nlink=named.st_nlink,
+                st_size=named.st_size + 1,
+                st_mtime_ns=named.st_mtime_ns,
+                st_ctime_ns=named.st_ctime_ns,
+            )
+
+            with mock.patch.object(
+                release_files,
+                "_WINDOWS",
+                True,
+            ), mock.patch.object(
+                release_files.os,
+                "fstat",
+                return_value=opened,
+            ):
+                with self.assertRaisesRegex(
+                    release_files.ReleaseFileError,
+                    "size changed",
+                ):
+                    with release_files.open_stable_regular_file(
+                        source,
+                        label="test source",
+                        require_single_link=True,
+                    ):
+                        self.fail("mismatched size must fail before yielding")
+
     @unittest.skipUnless(
         os.name == "nt",
         "Windows-specific open-file replacement semantics",

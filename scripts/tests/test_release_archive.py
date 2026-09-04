@@ -1023,6 +1023,10 @@ class ReleaseArchiveRoundTripTests(unittest.TestCase):
             )
             self.assertEqual(list(parked.iterdir()), [])
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows blocks replacement while the extraction member is open",
+    )
     def test_extraction_member_replacement_fails_without_deleting_replacement(
         self,
     ) -> None:
@@ -1070,6 +1074,94 @@ class ReleaseArchiveRoundTripTests(unittest.TestCase):
             self.assertIn("not created by this operation", str(raised.exception.cleanup))
             self.assertEqual(parked.read_bytes(), b"archive payload")
             self.assertEqual(member.read_bytes(), b"replacement must survive")
+
+    def test_extraction_rejects_initial_opened_and_named_state_mismatch(
+        self,
+    ) -> None:
+        expected = ("app-icon-toolkit/README.md",)
+        with tempfile.TemporaryDirectory(prefix="archive-member-state-") as temporary:
+            root = Path(temporary)
+            archive_path = root / "candidate.zip"
+            with zipfile.ZipFile(archive_path, mode="w") as archive:
+                archive.writestr(
+                    self.zip_member(expected[0], stat.S_IFREG | 0o644),
+                    b"archive payload",
+                )
+            extraction = root / "extracted"
+            extraction.mkdir()
+
+            with mock.patch.object(
+                release_package,
+                "opened_and_named_snapshots_agree",
+                return_value=False,
+            ):
+                with self.assertRaises(
+                    release_package.ReleasePackageCleanupError
+                ) as raised:
+                    release_package.safe_extract_archive(
+                        archive_path,
+                        "zip",
+                        extraction,
+                        expected,
+                    )
+
+            self.assertIn("does not identify", str(raised.exception.primary))
+            self.assertIn("not created by this operation", str(raised.exception.cleanup))
+            self.assertEqual((extraction / expected[0]).read_bytes(), b"")
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "requires Windows open-file replacement semantics",
+    )
+    def test_windows_open_extraction_member_blocks_replacement_and_cleans_up(
+        self,
+    ) -> None:
+        expected = ("app-icon-toolkit/README.md",)
+        with tempfile.TemporaryDirectory(prefix="archive-member-lock-") as temporary:
+            root = Path(temporary)
+            archive_path = root / "candidate.zip"
+            with zipfile.ZipFile(archive_path, mode="w") as archive:
+                archive.writestr(
+                    self.zip_member(expected[0], stat.S_IFREG | 0o644),
+                    b"archive payload",
+                )
+            extraction = root / "extracted"
+            extraction.mkdir()
+            member = extraction / expected[0]
+            parked = root / "parked-member"
+            replacement_error = None
+
+            def replace_member_before_fsync(descriptor):
+                nonlocal replacement_error
+                self.assertGreaterEqual(descriptor, 0)
+                self.assertTrue(member.is_file())
+                try:
+                    member.rename(parked)
+                except PermissionError as error:
+                    replacement_error = error
+                    raise
+                self.fail("Windows must reject renaming an open extraction member")
+
+            with mock.patch.object(
+                release_package.os,
+                "fsync",
+                side_effect=replace_member_before_fsync,
+            ):
+                with self.assertRaises(
+                    release_package.ReleasePackageError
+                ) as raised:
+                    release_package.safe_extract_archive(
+                        archive_path,
+                        "zip",
+                        extraction,
+                        expected,
+                    )
+
+            self.assertIsNotNone(replacement_error)
+            self.assertIn(replacement_error.winerror, {5, 32})
+            self.assertIs(raised.exception.__cause__, replacement_error)
+            self.assertFalse(parked.exists())
+            self.assertEqual(list(extraction.iterdir()), [])
 
     def test_cleanup_error_retains_primary_and_cleanup_failures(self) -> None:
         expected = ("app-icon-toolkit/README.md",)

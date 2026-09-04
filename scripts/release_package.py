@@ -13,7 +13,11 @@ from typing import BinaryIO
 import zipfile
 import zlib
 
-from release_files import open_stable_regular_file
+from release_files import (
+    FileSnapshot,
+    open_stable_regular_file,
+    opened_and_named_snapshots_agree,
+)
 from release_zip_preflight import (
     ZIP_CENTRAL_DIRECTORY_HEADER,
     scan_classic_zip,
@@ -239,6 +243,16 @@ class _ExtractionRoot:
     def display_path(self, parts: tuple[str, ...]) -> Path:
         return self.path.joinpath(*parts)
 
+    @staticmethod
+    def _stat_named_child(parent: int | Path, name: str) -> os.stat_result:
+        if isinstance(parent, int):
+            return os.stat(
+                name,
+                dir_fd=parent,
+                follow_symlinks=False,
+            )
+        return os.lstat(parent / name)
+
     @contextmanager
     def _open_directory(
         self,
@@ -366,13 +380,11 @@ class _ExtractionRoot:
         with self._open_directory(parts) as directory:
             try:
                 with os.scandir(directory) as entries:
-                    return sorted(
-                        (
-                            (entry.name, entry.stat(follow_symlinks=False))
-                            for entry in entries
-                        ),
-                        key=lambda item: item[0],
-                    )
+                    names = sorted(entry.name for entry in entries)
+                return [
+                    (name, self._stat_named_child(directory, name))
+                    for name in names
+                ]
             except OSError as error:
                 raise ReleasePackageError(
                     "cannot inspect incomplete extraction directory "
@@ -417,7 +429,25 @@ class _ExtractionRoot:
                             "new extraction member is not a single-link ordinary file: "
                             f"{self.display_path(parts)}"
                         )
-                    self._created_files[parts] = _filesystem_identity(opened)
+                    named_opened = self._stat_named_child(parent, parts[-1])
+                    if (
+                        not stat.S_ISREG(named_opened.st_mode)
+                        or named_opened.st_nlink != 1
+                        or not _entry_is_owned(named_opened)
+                        or opened.st_size != 0
+                        or named_opened.st_size != 0
+                        or not opened_and_named_snapshots_agree(
+                            FileSnapshot.from_stat(opened),
+                            FileSnapshot.from_stat(named_opened),
+                        )
+                    ):
+                        raise ReleasePackageError(
+                            "new extraction member path does not identify the opened file: "
+                            f"{self.display_path(parts)}"
+                        )
+                    opened_identity = _filesystem_identity(opened)
+                    named_identity = _filesystem_identity(named_opened)
+                    self._created_files[parts] = named_identity
                     while True:
                         chunk = source.read(COPY_BUFFER_BYTES)
                         if not chunk:
@@ -434,19 +464,21 @@ class _ExtractionRoot:
                     output.flush()
                     os.fsync(output.fileno())
                     opened_after = os.fstat(output.fileno())
-                    if isinstance(parent, int):
-                        named_after = os.stat(
-                            parts[-1],
-                            dir_fd=parent,
-                            follow_symlinks=False,
-                        )
-                    else:
-                        named_after = os.lstat(parent / parts[-1])
+                    named_after = self._stat_named_child(parent, parts[-1])
                     if (
                         not stat.S_ISREG(opened_after.st_mode)
                         or opened_after.st_nlink != 1
-                        or _entry_snapshot(opened_after)
-                        != _entry_snapshot(named_after)
+                        or not _entry_is_owned(opened_after)
+                        or _filesystem_identity(opened_after) != opened_identity
+                        or not stat.S_ISREG(named_after.st_mode)
+                        or named_after.st_nlink != 1
+                        or not _entry_is_owned(named_after)
+                        or _filesystem_identity(named_after) != named_identity
+                        or opened_after.st_size != copied
+                        or not opened_and_named_snapshots_agree(
+                            FileSnapshot.from_stat(opened_after),
+                            FileSnapshot.from_stat(named_after),
+                        )
                     ):
                         raise ReleasePackageError(
                             "extraction member path changed while it was being written: "
@@ -460,14 +492,7 @@ class _ExtractionRoot:
                 if not hasattr(os, "fchmod"):
                     assert isinstance(parent, Path)
                     (parent / parts[-1]).chmod(mode)
-                if isinstance(parent, int):
-                    completed = os.stat(
-                        parts[-1],
-                        dir_fd=parent,
-                        follow_symlinks=False,
-                    )
-                else:
-                    completed = os.lstat(parent / parts[-1])
+                completed = self._stat_named_child(parent, parts[-1])
                 if (
                     not stat.S_ISREG(completed.st_mode)
                     or completed.st_nlink != 1
@@ -497,14 +522,7 @@ class _ExtractionRoot:
             )
         for parts in sorted(expected_parts):
             with self._open_directory(parts[:-1]) as parent:
-                if isinstance(parent, int):
-                    current = os.stat(
-                        parts[-1],
-                        dir_fd=parent,
-                        follow_symlinks=False,
-                    )
-                else:
-                    current = os.lstat(parent / parts[-1])
+                current = self._stat_named_child(parent, parts[-1])
             if (
                 not stat.S_ISREG(current.st_mode)
                 or current.st_nlink != 1
@@ -525,14 +543,7 @@ class _ExtractionRoot:
     ) -> None:
         with self._open_directory(parts[:-1], directories) as parent:
             try:
-                if isinstance(parent, int):
-                    current = os.stat(
-                        parts[-1],
-                        dir_fd=parent,
-                        follow_symlinks=False,
-                    )
-                else:
-                    current = os.lstat(parent / parts[-1])
+                current = self._stat_named_child(parent, parts[-1])
                 if _entry_snapshot(current) != _entry_snapshot(before):
                     raise ReleasePackageError(
                         "incomplete extraction file changed before cleanup: "
@@ -558,14 +569,7 @@ class _ExtractionRoot:
     ) -> None:
         with self._open_directory(parts[:-1], directories) as parent:
             try:
-                if isinstance(parent, int):
-                    current = os.stat(
-                        parts[-1],
-                        dir_fd=parent,
-                        follow_symlinks=False,
-                    )
-                else:
-                    current = os.lstat(parent / parts[-1])
+                current = self._stat_named_child(parent, parts[-1])
                 if (
                     not _is_ordinary_directory(current)
                     or _filesystem_identity(current) != _filesystem_identity(before)

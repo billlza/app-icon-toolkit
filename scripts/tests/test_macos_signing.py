@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -714,6 +715,10 @@ class SigningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="macos-signing-race-") as temporary:
             path = Path(temporary) / "binary"
             path.write_bytes(b"original-input")
+            unchanged_snapshot = macos_signing.validate_regular_single_link(
+                path,
+                label="test signing input",
+            )
 
             def mutate_after_identity_lookup():
                 path.write_bytes(b"replaced-input")
@@ -743,17 +748,83 @@ class SigningTests(unittest.TestCase):
                 ]
             )
 
-            with self.assertRaisesRegex(
-                macos_signing.SignatureValidationError, "changed during pre-sign"
+            with mock.patch.object(
+                macos_signing,
+                "validate_regular_single_link",
+                return_value=unchanged_snapshot,
             ):
-                macos_signing.sign_and_verify(
-                    path,
-                    expected_architectures=("arm64",),
-                    identity_sha1=IDENTITY,
-                    identifier=IDENTIFIER,
-                    team_id=TEAM,
-                    runner=runner,
-                )
+                with self.assertRaisesRegex(
+                    macos_signing.SignatureValidationError, "changed during pre-sign"
+                ):
+                    macos_signing.sign_and_verify(
+                        path,
+                        expected_architectures=("arm64",),
+                        identity_sha1=IDENTITY,
+                        identifier=IDENTIFIER,
+                        team_id=TEAM,
+                        runner=runner,
+                    )
+
+            self.assertNotIn(sign_command(path), runner.seen)
+            runner.assert_finished(self)
+
+    def test_pre_sign_metadata_mutation_stops_when_digest_is_unchanged(self):
+        with tempfile.TemporaryDirectory(prefix="macos-signing-metadata-") as temporary:
+            path = Path(temporary) / "binary"
+            path.write_bytes(b"unchanged-input")
+            initial_snapshot = macos_signing.validate_regular_single_link(
+                path,
+                label="test signing input",
+            )
+            changed_snapshot = replace(
+                initial_snapshot,
+                changed_ns=initial_snapshot.changed_ns + 1,
+            )
+            runner = ScriptedRunner(
+                [
+                    step(lipo_command(path), stdout="arm64\n"),
+                    step(
+                        display_command(path, "arm64"),
+                        stderr=adhoc_output(path, "arm64"),
+                    ),
+                    step(
+                        entitlement_command(path, "arm64"),
+                        stderr=f"Executable={absolute(path)}\n",
+                    ),
+                    step(
+                        (
+                            macos_signing.SECURITY,
+                            "find-identity",
+                            "-v",
+                            "-p",
+                            "codesigning",
+                        ),
+                        stdout=f'  1) {IDENTITY} "{LEAF}"\n',
+                    ),
+                ]
+            )
+
+            with mock.patch.object(
+                macos_signing,
+                "validate_regular_single_link",
+                side_effect=(
+                    initial_snapshot,
+                    initial_snapshot,
+                    changed_snapshot,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    macos_signing.SignatureValidationError,
+                    "changed during pre-sign",
+                ):
+                    macos_signing.sign_and_verify(
+                        path,
+                        expected_architectures=("arm64",),
+                        identity_sha1=IDENTITY,
+                        identifier=IDENTIFIER,
+                        team_id=TEAM,
+                        runner=runner,
+                    )
 
             self.assertNotIn(sign_command(path), runner.seen)
             runner.assert_finished(self)

@@ -810,7 +810,12 @@ def sign_and_verify(
     _require_expected_architectures(actual_architectures, expected_architectures)
     inspect_pre_signatures(path, actual_architectures, runner)
     expected_leaf = developer_id_leaf(identity_sha1, team_id, runner)
-    if validate_regular_single_link(path, label="macOS signing input") != input_snapshot:
+    pre_sign_snapshot = validate_regular_single_link(
+        path,
+        label="macOS signing input",
+    )
+    pre_sign_sha256 = sha256_file(path)
+    if pre_sign_snapshot != input_snapshot or pre_sign_sha256 != input_sha256:
         raise SignatureValidationError(
             "macOS signing input changed during pre-sign verification"
         )

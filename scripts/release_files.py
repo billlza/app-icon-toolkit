@@ -65,6 +65,24 @@ class FileSnapshot:
         )
 
 
+def opened_and_named_snapshots_agree(
+    opened: FileSnapshot,
+    named: FileSnapshot,
+) -> bool:
+    """Compare open-handle and named-path views without mixing identity domains.
+
+    Windows exposes different identity encodings through ``fstat`` and
+    path-based stat calls.  A normal Python file handle also prevents the
+    named file from being replaced while it is open, so size is the portable
+    cross-channel fact there.  Callers must still validate and track each
+    channel independently.
+    """
+
+    if _WINDOWS:
+        return opened.size == named.size
+    return opened == named
+
+
 def absolute_path(path: Path | str) -> Path:
     """Make a path absolute without following its final component."""
 
@@ -171,7 +189,10 @@ def open_stable_regular_file(
                 raise ReleaseFileError(
                     f"{label} path changed while it was being opened: {absolute}"
                 )
-            if opened_snapshot.size != named_opened.size:
+            if not opened_and_named_snapshots_agree(
+                opened_snapshot,
+                named_opened,
+            ):
                 raise ReleaseFileError(
                     f"{label} size changed while it was being opened: {absolute}"
                 )
