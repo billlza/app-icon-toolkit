@@ -5,16 +5,18 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
+from contextlib import contextmanager
 import filecmp
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Iterator
 
 from release_package import STATIC_PATHS
 
@@ -114,6 +116,86 @@ def isolated_host_environment(codex_home: Path) -> dict[str, str]:
         environment.pop(name, None)
     environment["CODEX_HOME"] = str(codex_home)
     return environment
+
+
+def _validate_host_directory(
+    path: Path,
+    *,
+    label: str,
+    require_private: bool,
+) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as error:
+        raise RuntimeError(f"cannot inspect {label} {path}: {error}") from error
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or (reparse_attribute and file_attributes & reparse_attribute)
+    ):
+        raise RuntimeError(f"{label} must be an ordinary directory: {path}")
+    if hasattr(os, "getuid"):
+        if metadata.st_uid != os.getuid():
+            raise RuntimeError(f"{label} must be owned by the current user: {path}")
+        forbidden_permissions = 0o077 if require_private else 0o022
+        if stat.S_IMODE(metadata.st_mode) & forbidden_permissions:
+            requirement = (
+                "must be private"
+                if require_private
+                else "must not be writable by group or other users"
+            )
+            raise RuntimeError(f"{label} {requirement}: {path}")
+
+
+def _host_workspace_parent() -> Path:
+    try:
+        user_home = Path.home().resolve(strict=True)
+        system_temporary = Path(tempfile.gettempdir()).resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(f"cannot resolve isolated host workspace parent: {error}") from error
+    _validate_host_directory(
+        user_home,
+        label="user home",
+        require_private=False,
+    )
+    if user_home == system_temporary or user_home.is_relative_to(system_temporary):
+        raise RuntimeError(
+            f"user home must not be inside the system temporary directory: {user_home}"
+        )
+    return user_home
+
+
+@contextmanager
+def isolated_host_workspace(
+    plugin_root: Path,
+) -> Iterator[tuple[Path, Path]]:
+    """Create one private Codex host state root outside system temporary paths."""
+
+    parent = _host_workspace_parent()
+    with tempfile.TemporaryDirectory(
+        prefix=".app-icon-toolkit-codex-host-",
+        dir=parent,
+    ) as temporary:
+        workspace = Path(temporary).resolve(strict=True)
+        _validate_host_directory(
+            workspace,
+            label="isolated host workspace",
+            require_private=True,
+        )
+        if workspace == plugin_root or workspace.is_relative_to(plugin_root):
+            raise RuntimeError(
+                f"isolated host workspace must be outside plugin source: {workspace}"
+            )
+        codex_home = workspace / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        _validate_host_directory(
+            codex_home,
+            label="isolated CODEX_HOME",
+            require_private=True,
+        )
+        yield workspace, codex_home
 
 
 def resolve_codex_executable() -> str:
@@ -400,10 +482,10 @@ def main() -> None:
         if not path.is_file() or path.is_symlink():
             raise SystemExit(f"installed plugin input is unavailable: {path}")
 
-    with tempfile.TemporaryDirectory(prefix="app-icon-toolkit-codex-host-") as temporary:
-        host_working_directory = Path(temporary)
-        codex_home = host_working_directory / "codex-home"
-        codex_home.mkdir(mode=0o700)
+    with isolated_host_workspace(plugin_root) as (
+        host_working_directory,
+        codex_home,
+    ):
         host_environment = isolated_host_environment(codex_home)
         host_version = execute_command(
             [codex, "--version"], host_working_directory, host_environment

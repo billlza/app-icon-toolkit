@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -28,9 +29,16 @@ class CodexPluginInstallTests(unittest.TestCase):
             ),
             (
                 subprocess.CompletedProcess(
-                    args=["codex"], returncode=0, stdout="{}", stderr="warning"
+                    args=["codex"],
+                    returncode=0,
+                    stdout="{}",
+                    stderr=(
+                        "WARNING: proceeding, even though we could not create PATH "
+                        "aliases: Refusing to create helper binaries under temporary "
+                        'dir "/tmp"'
+                    ),
                 ),
-                "emitted stderr despite succeeding: warning",
+                "emitted stderr despite succeeding: WARNING: proceeding",
             ),
         ]
         for completed, message in cases:
@@ -143,6 +151,85 @@ class CodexPluginInstallTests(unittest.TestCase):
                 check_codex_plugin_install.validate_isolated_cache_path(
                     outside, codex_home
                 )
+
+    def test_isolated_host_workspace_uses_private_user_home_and_cleans_up(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="codex-workspace-parent-test-",
+            dir=Path.cwd(),
+        ) as temporary:
+            root = Path(temporary)
+            fake_home = root / "home"
+            plugin_root = root / "plugin"
+            fake_home.mkdir(mode=0o700)
+            plugin_root.mkdir()
+
+            with mock.patch.object(Path, "home", return_value=fake_home):
+                with check_codex_plugin_install.isolated_host_workspace(
+                    plugin_root
+                ) as (first_workspace, codex_home):
+                    self.assertEqual(first_workspace.parent, fake_home.resolve())
+                    self.assertEqual(codex_home.parent, first_workspace)
+                    self.assertEqual(
+                        check_codex_plugin_install.isolated_host_environment(
+                            codex_home
+                        )["CODEX_HOME"],
+                        str(codex_home),
+                    )
+                    if hasattr(os, "getuid"):
+                        self.assertEqual(
+                            stat.S_IMODE(os.lstat(first_workspace).st_mode),
+                            0o700,
+                        )
+                        self.assertEqual(
+                            stat.S_IMODE(os.lstat(codex_home).st_mode),
+                            0o700,
+                        )
+                    with check_codex_plugin_install.isolated_host_workspace(
+                        plugin_root
+                    ) as (second_workspace, _second_codex_home):
+                        self.assertNotEqual(second_workspace, first_workspace)
+                    self.assertFalse(second_workspace.exists())
+                    retained_workspace = first_workspace
+
+            self.assertFalse(retained_workspace.exists())
+
+    def test_isolated_host_workspace_rejects_temporary_or_missing_home(self) -> None:
+        plugin_root = Path.cwd().resolve(strict=True)
+        with tempfile.TemporaryDirectory(
+            prefix="codex-temporary-home-test-"
+        ) as temporary:
+            temporary_home = Path(temporary)
+            with mock.patch.object(Path, "home", return_value=temporary_home):
+                with self.assertRaisesRegex(RuntimeError, "system temporary"):
+                    with check_codex_plugin_install.isolated_host_workspace(
+                        plugin_root
+                    ):
+                        self.fail("system temporary homes must be rejected")
+
+            missing_home = temporary_home / "missing"
+            with mock.patch.object(Path, "home", return_value=missing_home):
+                with self.assertRaisesRegex(RuntimeError, "cannot resolve"):
+                    with check_codex_plugin_install.isolated_host_workspace(
+                        plugin_root
+                    ):
+                        self.fail("missing homes must be rejected")
+
+    def test_isolated_host_workspace_rejects_plugin_source_containment(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="codex-workspace-containment-test-",
+            dir=Path.cwd(),
+        ) as temporary:
+            fake_home = Path(temporary) / "home"
+            fake_home.mkdir(mode=0o700)
+            with mock.patch.object(Path, "home", return_value=fake_home):
+                with self.assertRaisesRegex(RuntimeError, "outside plugin source"):
+                    with check_codex_plugin_install.isolated_host_workspace(
+                        fake_home.resolve()
+                    ):
+                        self.fail("host workspace cannot be inside plugin source")
+            self.assertEqual(list(fake_home.iterdir()), [])
 
     def test_codex_executable_is_resolved_before_working_directory_changes(
         self,
