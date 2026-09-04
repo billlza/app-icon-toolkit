@@ -193,28 +193,40 @@ class ValidateSignedDraftTests(unittest.TestCase):
             self.assertEqual(destination.name, spec.archive_name)
             command, called_destination, keywords = calls[0]
             self.assertEqual(called_destination, destination)
-            self.assertIn(
-                f"repos/{REPOSITORY}/releases/assets/{spec.archive_asset_id}",
+            self.assertEqual(
                 command,
+                (
+                    "/usr/bin/gh",
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    "-H",
+                    "Accept: application/octet-stream",
+                    f"repos/{REPOSITORY}/releases/assets/{spec.archive_asset_id}",
+                ),
             )
             self.assertEqual(keywords["expected_size"], spec.archive_size)
 
     def test_candidate_validation_refuses_github_tokens_before_execution(self) -> None:
         spec = self.plan.validations[0]
-        with mock.patch.object(hosted_runner, "run_required") as run:
-            with self.assertRaisesRegex(
-                validate_signed_draft.HostedValidationCliError,
-                "refuses GitHub token",
-            ):
-                validate_signed_draft.validate_target(
-                    plugin_root=Path("/plugin"),
-                    plan=self.plan,
-                    spec=spec,
-                    archive=Path(spec.archive_name),
-                    contract=self.contract,
-                    environment={"GH_TOKEN": "secret"},
-                )
-        run.assert_not_called()
+        for token_name in ("GH_TOKEN", "GITHUB_TOKEN"):
+            with self.subTest(token_name=token_name), mock.patch.object(
+                hosted_runner,
+                "run_required",
+            ) as run:
+                with self.assertRaisesRegex(
+                    validate_signed_draft.HostedValidationCliError,
+                    "refuses GitHub token",
+                ):
+                    validate_signed_draft.validate_target(
+                        plugin_root=Path("/plugin"),
+                        plan=self.plan,
+                        spec=spec,
+                        archive=Path(spec.archive_name),
+                        contract=self.contract,
+                        environment={token_name: "secret"},
+                    )
+                run.assert_not_called()
 
     def test_target_validation_runs_signature_ticket_and_mcp_smoke_without_token(self) -> None:
         spec = next(
@@ -271,7 +283,11 @@ class ValidateSignedDraftTests(unittest.TestCase):
                     spec=spec,
                     archive=archive,
                     contract=self.contract,
-                    environment={},
+                    environment={
+                        "ACTIONS_RUNTIME_TOKEN": "not-forwarded",
+                        "HOME": "/untrusted",
+                        "PATH": "/untrusted",
+                    },
                 )
 
             self.assertTrue(result.mcp_smoke_valid)
@@ -297,6 +313,7 @@ class ValidateSignedDraftTests(unittest.TestCase):
                 "GITHUB_ENV",
                 "GITHUB_OUTPUT",
                 "GITHUB_PATH",
+                "ACTIONS_RUNTIME_TOKEN",
                 "HOME",
             ):
                 self.assertNotIn(name, smoke_environment)

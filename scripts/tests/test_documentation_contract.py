@@ -25,7 +25,7 @@ class DocumentationContractTests(unittest.TestCase):
         )
         readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
         install = (REPOSITORY_ROOT / "INSTALL.md").read_text(encoding="utf-8")
-        self.assertIn("v0.2.5 and later use Developer ID signing", readme)
+        self.assertIn("v0.2.6 and later use Developer ID signing", readme)
         self.assertIn("ditto -x -k", install)
         self.assertIn("cannot carry a stapled ticket", install)
         self.assertNotIn(
@@ -35,16 +35,33 @@ class DocumentationContractTests(unittest.TestCase):
 
     def test_release_security_boundary_is_documented(self) -> None:
         security = (REPOSITORY_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        architecture = (REPOSITORY_ROOT / "ARCHITECTURE.md").read_text(
+            encoding="utf-8"
+        )
         contributing = (REPOSITORY_ROOT / "CONTRIBUTING.md").read_text(
             encoding="utf-8"
         )
         normalized_security = " ".join(security.split())
+        normalized_architecture = " ".join(architecture.split())
         normalized_contributing = " ".join(contributing.split())
         self.assertIn(
             "the signing process never starts a candidate executable",
             normalized_security,
         )
+        self.assertIn(
+            "push-equivalent Draft visibility is confined to hosted metadata, "
+            "byte-fetch, and refresh jobs that never extract or execute candidates",
+            normalized_security,
+        )
+        self.assertIn(
+            "transfer verified bytes through attempt-bound Actions artifacts",
+            normalized_architecture,
+        )
         self.assertIn("must not execute downloaded candidates", normalized_contributing)
+        self.assertIn(
+            "native validation and receipt aggregation remain read-only",
+            normalized_contributing,
+        )
         self.assertIn("immutable publication", normalized_contributing)
 
     def test_installation_and_upgrade_are_versioned_and_fail_closed(self) -> None:
@@ -84,6 +101,14 @@ class DocumentationContractTests(unittest.TestCase):
 
         self.assertIn('  --ref "$RELEASE_TAG"', releasing)
         self.assertIn("Validate Signed Draft", releasing)
+        self.assertIn(
+            "grants its installation token `contents: write` only in isolated jobs",
+            normalized,
+        )
+        self.assertIn(
+            "The annotated `v0.2.5` tag records a third unpublished attempt",
+            releasing,
+        )
         self.assertIn("HOSTED_WORKFLOW_ID", releasing)
         self.assertIn("HOSTED_RUN_ID", releasing)
         self.assertIn("HOSTED_RUN_ATTEMPT", releasing)

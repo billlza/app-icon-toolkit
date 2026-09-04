@@ -3,6 +3,21 @@
 All notable user-visible changes are documented here. This project follows
 Semantic Versioning.
 
+## 0.2.6 - 2026-09-05
+
+### Fixed
+
+- Give only the isolated signed-Draft metadata, asset-fetch, and refresh jobs
+  the push-equivalent visibility GitHub requires for unpublished releases,
+  while keeping native candidate execution and receipt aggregation in
+  read-only jobs with no persisted credentials.
+- Transfer size- and digest-verified Draft assets through attempt-bound Actions
+  artifacts before native validation, and split remote reads into observable
+  steps so authorization failures identify the exact boundary.
+- Preserve the failed, unpublished v0.2.5 Draft, signed assets, workflow run,
+  and local receipts while starting v0.2.6 from a new commit, tag, workflow
+  run, artifact set, and local attempt root.
+
 ## 0.2.5 - 2026-09-05
 
 ### Fixed

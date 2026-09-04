@@ -15,6 +15,7 @@ WORKFLOW_PATHS = (
     Path(".github/workflows/validate-signed-draft.yml"),
 )
 JOB_HEADER = re.compile(r"^  ([a-zA-Z0-9_-]+):$", re.MULTILINE)
+STEP_HEADER = re.compile(r"^      - [a-zA-Z0-9_-]+:", re.MULTILINE)
 PINNED_ACTION = re.compile(r"^\s*- uses: ([^@\s]+)@([^\s]+)", re.MULTILINE)
 MATRIX_OUTPUT = re.compile(
     r"matrix: \$\{\{ fromJSON\(needs\.[a-zA-Z0-9_-]+\.outputs\."
@@ -63,6 +64,75 @@ def job_permissions(block: str) -> dict[str, str]:
             raise AssertionError(f"job repeats permission {name!r}")
         permissions[name] = value
     return permissions
+
+
+def step_blocks(block: str) -> tuple[str, ...]:
+    matches = tuple(STEP_HEADER.finditer(block))
+    return tuple(
+        block[
+            match.start() : matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(block)
+        ]
+        for index, match in enumerate(matches)
+    )
+
+
+def step_name(step: str) -> str | None:
+    match = re.search(
+        r"^(?:      - name|        name): (.+)$",
+        step,
+        re.MULTILINE,
+    )
+    return match.group(1) if match else None
+
+
+def named_step_blocks(block: str) -> dict[str, str]:
+    named: dict[str, str] = {}
+    for step in step_blocks(block):
+        name = step_name(step)
+        if name is None:
+            continue
+        if name in named:
+            raise AssertionError(f"job repeats step name {name!r}")
+        named[name] = step
+    return named
+
+
+def step_contracts(block: str) -> tuple[tuple[str | None, str, str], ...]:
+    contracts = []
+    for step in step_blocks(block):
+        name = step_name(step)
+        uses_match = re.search(
+            r"^(?:      - uses|        uses): (.+)$",
+            step,
+            re.MULTILINE,
+        )
+        run_match = re.search(
+            r"^(?:      - run|        run): (.+)$",
+            step,
+            re.MULTILINE,
+        )
+        if (uses_match is None) == (run_match is None):
+            raise AssertionError("step must contain exactly one uses or run entry")
+        if uses_match:
+            contracts.append((name, "uses", uses_match.group(1)))
+            continue
+        assert run_match is not None
+        run_value = run_match.group(1)
+        if run_value in {"|", ">-"}:
+            body_lines = []
+            for line in step[run_match.end() :].splitlines():
+                if not line:
+                    continue
+                if not line.startswith("          "):
+                    raise AssertionError("run step contains an unexpected property")
+                body_lines.append(line[10:])
+            if not body_lines:
+                raise AssertionError("run step must contain a command")
+            run_value = "\n".join(body_lines)
+        contracts.append((name, "run", run_value))
+    return tuple(contracts)
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -289,10 +359,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("  workflow_dispatch:\n", workflow)
         self.assertNotIn("  push:\n", workflow)
         self.assertNotIn("  pull_request_target:\n", workflow)
-        self.assertNotIn("contents: write", workflow)
         self.assertNotIn("secrets.", workflow)
-        self.assertEqual(workflow.count("persist-credentials: false"), 3)
-        self.assertEqual(workflow.count("timeout-minutes: 10"), 2)
+        self.assertNotIn("write-all", workflow)
+        self.assertEqual(workflow.count("persist-credentials: false"), 4)
+        self.assertEqual(workflow.count("timeout-minutes: 10"), 4)
         self.assertEqual(workflow.count("timeout-minutes: 30"), 1)
         self.assertIn(
             "matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}",
@@ -300,25 +370,222 @@ class WorkflowContractTests(unittest.TestCase):
         )
 
         blocks = job_blocks(workflow)
-        self.assertEqual(set(blocks), {"plan", "validate", "receipt"})
+        expected_permissions = {
+            "plan": {"actions": "read", "contents": "write"},
+            "fetch": {"actions": "read", "contents": "write"},
+            "validate": {"actions": "read", "contents": "read"},
+            "refresh-draft": {"contents": "write"},
+            "receipt": {"actions": "read", "contents": "read"},
+        }
+        self.assertEqual(set(blocks), set(expected_permissions))
+        checkout_jobs = {"plan", "fetch", "validate", "receipt"}
         for job_name, block in blocks.items():
             with self.subTest(job=job_name):
                 self.assertEqual(
                     job_permissions(block),
-                    {"actions": "read", "contents": "read"},
+                    expected_permissions[job_name],
                 )
                 self.assertNotIn("id-token:", block)
-                self.assertNotRegex(
-                    block,
-                    r"(?m)^\s+[a-z-]+:\s+(?:write|write-all)\s*$",
+                expected_checkout_count = 1 if job_name in checkout_jobs else 0
+                self.assertEqual(
+                    block.count("uses: actions/checkout@"),
+                    expected_checkout_count,
                 )
-                self.assertEqual(block.count("uses: actions/checkout@"), 1)
-                self.assertEqual(block.count("ref: ${{ inputs.head_sha }}"), 1)
-                self.assertEqual(block.count("persist-credentials: false"), 1)
+                self.assertEqual(
+                    block.count("ref: ${{ inputs.head_sha }}"),
+                    expected_checkout_count,
+                )
+                self.assertEqual(
+                    block.count("persist-credentials: false"),
+                    expected_checkout_count,
+                )
 
-        self.assertIn("needs: plan\n", blocks["validate"])
+        write_capable_jobs = {"plan", "fetch", "refresh-draft"}
+        for job_name in write_capable_jobs:
+            block = blocks[job_name]
+            for forbidden in (
+                "validate-target",
+                "smoke-installed-plugin.py",
+                "check-release-binary.py",
+                "safe_extract_archive",
+                "gh release",
+                "--method POST",
+                "--method PATCH",
+                "--method PUT",
+                "--method DELETE",
+                "--method=",
+                "-X ",
+                "--field ",
+                "--raw-field ",
+                "--input ",
+                "-f ",
+                "-F ",
+                "git push",
+            ):
+                with self.subTest(job=job_name, forbidden=forbidden):
+                    self.assertNotIn(forbidden, block)
+
+        checkout_action = (
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 "
+            "# v7.0.1"
+        )
+        upload_action = (
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a "
+            "# v7.0.1"
+        )
+        verify_dispatch = '''set -euo pipefail
+test "$GITHUB_REF_TYPE" = "tag"
+test "$GITHUB_REF_NAME" = "$EXPECTED_TAG"
+test "$GITHUB_SHA" = "$EXPECTED_HEAD_SHA"
+test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"'''
+        fetch_source_run = '''set -euo pipefail
+gh run view "$SOURCE_RUN_ID" \\
+  --repo "$GITHUB_REPOSITORY" \\
+  --json databaseId,workflowDatabaseId,attempt,headBranch,headSha,workflowName,event,status,conclusion \\
+  > source-run.json'''
+        fetch_draft = '''set -euo pipefail
+gh api --hostname github.com \\
+  "repos/$GITHUB_REPOSITORY/releases/$RELEASE_DATABASE_ID" \\
+  > draft-release.json'''
+        fetch_workflow = '''set -euo pipefail
+validation_workflow_id=$(gh api --hostname github.com \\
+  "repos/$GITHUB_REPOSITORY/actions/workflows/validate-signed-draft.yml" \\
+  --jq .id)
+test "$validation_workflow_id" -gt 0
+printf '%s\\n' "$validation_workflow_id" > validation-workflow-id.txt'''
+        bind_plan = '''set -euo pipefail
+validation_workflow_id=$(cat validation-workflow-id.txt)
+python3 scripts/validate-signed-draft.py plan \\
+  --repository "$GITHUB_REPOSITORY" \\
+  --source-workflow-id "$SOURCE_WORKFLOW_ID" \\
+  --source-run-id "$SOURCE_RUN_ID" \\
+  --source-run-attempt "$SOURCE_RUN_ATTEMPT" \\
+  --source-run-json source-run.json \\
+  --validation-workflow-id "$validation_workflow_id" \\
+  --validation-run-id "$GITHUB_RUN_ID" \\
+  --validation-run-attempt "$GITHUB_RUN_ATTEMPT" \\
+  --tag "$RELEASE_TAG" \\
+  --head-sha "$RELEASE_HEAD_SHA" \\
+  --release-id "$RELEASE_ID" \\
+  --release-database-id "$RELEASE_DATABASE_ID" \\
+  --release-json draft-release.json \\
+  --notes-file CHANGELOG.md \\
+  --identity-sha1 "$IDENTITY_SHA1" \\
+  --output hosted-validation-plan.json \\
+  --github-output "$GITHUB_OUTPUT"'''
+        download_plan = '''set -euo pipefail
+mkdir hosted-plan
+gh run download "$GITHUB_RUN_ID" \\
+  --repo "$GITHUB_REPOSITORY" \\
+  --name "signed-draft-plan-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" \\
+  --dir hosted-plan'''
+        fetch_asset = '''python3 scripts/validate-signed-draft.py download
+--plan hosted-plan/hosted-validation-plan.json
+--validation-id "$VALIDATION_ID"
+--output-directory signed-asset'''
+        refresh_draft = '''gh api --hostname github.com
+"repos/$GITHUB_REPOSITORY/releases/$RELEASE_DATABASE_ID"
+> fresh-draft-release.json'''
+        expected_write_steps = {
+            "plan": (
+                (None, "uses", checkout_action),
+                ("Verify tag-dispatch and checkout binding", "run", verify_dispatch),
+                ("Fetch exact source workflow run", "run", fetch_source_run),
+                ("Fetch exact signed Draft metadata", "run", fetch_draft),
+                ("Fetch hosted validation workflow identity", "run", fetch_workflow),
+                ("Bind source run and exact signed Draft assets", "run", bind_plan),
+                ("Upload exact validation plan", "uses", upload_action),
+            ),
+            "fetch": (
+                (None, "uses", checkout_action),
+                ("Download this run's exact validation plan", "run", download_plan),
+                (
+                    "Fetch and verify exact numeric signed Draft asset",
+                    "run",
+                    fetch_asset,
+                ),
+                (
+                    "Transfer verified bytes to the read-only validation boundary",
+                    "uses",
+                    upload_action,
+                ),
+            ),
+            "refresh-draft": (
+                (
+                    "Refresh the exact unpublished release",
+                    "run",
+                    refresh_draft,
+                ),
+                (
+                    "Transfer the attempt-bound Draft snapshot",
+                    "uses",
+                    upload_action,
+                ),
+            ),
+        }
+        for job_name, expected_steps in expected_write_steps.items():
+            with self.subTest(job=job_name, contract="write-step-allowlist"):
+                self.assertEqual(step_contracts(blocks[job_name]), expected_steps)
+
+        token_steps = {
+            "plan": {
+                "Fetch exact source workflow run",
+                "Fetch exact signed Draft metadata",
+                "Fetch hosted validation workflow identity",
+            },
+            "fetch": {
+                "Download this run's exact validation plan",
+                "Fetch and verify exact numeric signed Draft asset",
+            },
+            "validate": {
+                "Download this run's exact validation plan",
+                "Download exact verified asset from the isolated fetch job",
+            },
+            "refresh-draft": {"Refresh the exact unpublished release"},
+            "receipt": {"Download exact plan and native result artifacts"},
+        }
+        for job_name, expected_token_steps in token_steps.items():
+            block = blocks[job_name]
+            self.assertNotRegex(block, r"(?m)^    env:")
+            self.assertEqual(
+                block.count("GH_TOKEN: ${{ github.token }}"),
+                len(expected_token_steps),
+            )
+            self.assertNotIn("GITHUB_TOKEN", block)
+            for name, step in named_step_blocks(block).items():
+                expected_count = 1 if name in expected_token_steps else 0
+                with self.subTest(job=job_name, step=name, contract="token"):
+                    self.assertEqual(
+                        step.count("GH_TOKEN: ${{ github.token }}"),
+                        expected_count,
+                    )
+
+        write_uploads = {
+            ("plan", "Upload exact validation plan"): "hosted-validation-plan.json",
+            (
+                "fetch",
+                "Transfer verified bytes to the read-only validation boundary",
+            ): "signed-asset/${{ matrix.archive_name }}",
+            (
+                "refresh-draft",
+                "Transfer the attempt-bound Draft snapshot",
+            ): "fresh-draft-release.json",
+        }
+        for (job_name, name), expected_path in write_uploads.items():
+            step = named_step_blocks(blocks[job_name])[name]
+            with self.subTest(job=job_name, step=name, contract="upload"):
+                self.assertEqual(step.count(f"path: {expected_path}"), 1)
+                self.assertEqual(step.count("if-no-files-found: error"), 1)
+                self.assertEqual(step.count("retention-days: 90"), 1)
+
+        self.assertIn("needs: plan\n", blocks["fetch"])
+        self.assertIn("needs: [plan, fetch]\n", blocks["validate"])
         self.assertIn("strategy:\n      fail-fast: false\n", blocks["validate"])
-        self.assertIn("needs: [plan, validate]\n", blocks["receipt"])
+        self.assertIn("needs: [plan, validate]\n", blocks["refresh-draft"])
+        self.assertIn(
+            "needs: [plan, validate, refresh-draft]\n",
+            blocks["receipt"],
+        )
 
         plan_producer = (
             "name: signed-draft-plan-run-${{ github.run_id }}-attempt-"
@@ -340,10 +607,30 @@ class WorkflowContractTests(unittest.TestCase):
             "name: hosted-validation-receipt-run-${{ github.run_id }}-attempt-"
             "${{ github.run_attempt }}"
         )
+        asset_producer = (
+            "name: signed-draft-asset-${{ matrix.validation_id }}-run-"
+            "${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+        )
+        asset_consumer = (
+            '--name "signed-draft-asset-${{ matrix.validation_id }}-run-'
+            '${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"'
+        )
+        refresh_producer = (
+            "name: signed-draft-refresh-run-${{ github.run_id }}-attempt-"
+            "${{ github.run_attempt }}"
+        )
+        refresh_consumer = (
+            '--name "signed-draft-refresh-run-${GITHUB_RUN_ID}-attempt-'
+            '${GITHUB_RUN_ATTEMPT}"'
+        )
         self.assertEqual(workflow.count(plan_producer), 1)
-        self.assertEqual(workflow.count(plan_consumer), 2)
+        self.assertEqual(workflow.count(plan_consumer), 3)
+        self.assertEqual(workflow.count(asset_producer), 1)
+        self.assertEqual(workflow.count(asset_consumer), 1)
         self.assertEqual(workflow.count(result_producer), 1)
         self.assertEqual(workflow.count(result_consumer), 1)
+        self.assertEqual(workflow.count(refresh_producer), 1)
+        self.assertEqual(workflow.count(refresh_consumer), 1)
         self.assertEqual(workflow.count(receipt_producer), 1)
         for unbound_name in (
             "name: signed-draft-plan-run-${{ github.run_id }}\n",
@@ -353,6 +640,19 @@ class WorkflowContractTests(unittest.TestCase):
         ):
             with self.subTest(unbound_name=unbound_name):
                 self.assertNotIn(unbound_name, workflow)
+
+        self.assertEqual(
+            blocks["fetch"].count("scripts/validate-signed-draft.py download"),
+            1,
+        )
+        self.assertNotIn(
+            "scripts/validate-signed-draft.py download",
+            blocks["validate"],
+        )
+        self.assertIn(asset_consumer, blocks["validate"])
+        self.assertIn(refresh_consumer, blocks["receipt"])
+        self.assertNotIn("actions/checkout@", blocks["refresh-draft"])
+        self.assertNotIn("scripts/", blocks["refresh-draft"])
 
         for command in (
             'test "$GITHUB_REF_TYPE" = "tag"',
@@ -371,18 +671,32 @@ class WorkflowContractTests(unittest.TestCase):
             1,
         )
 
-        smoke_start = workflow.index(
-            "      - name: Verify signature, ticket, architecture, and MCP runtime\n"
+        credential_free_steps = (
+            (
+                "      - id: plan\n",
+                "      - name: Upload exact validation plan\n",
+            ),
+            (
+                "      - name: Verify signature, ticket, architecture, and MCP runtime\n",
+                "      - name: Upload native validation result\n",
+            ),
+            (
+                "      - name: Build strict hosted validation receipt\n",
+                "      - name: Upload attempt-bound validation receipt\n",
+            ),
         )
-        smoke_end = workflow.index(
-            "      - name: Upload native validation result\n",
-            smoke_start,
-        )
-        smoke_step = workflow[smoke_start:smoke_end]
-        self.assertNotIn("GH_TOKEN", smoke_step)
-        self.assertNotIn("GITHUB_TOKEN", smoke_step)
-        self.assertNotIn("github.token", smoke_step)
-        self.assertNotIn("secrets.", smoke_step)
+        for start_marker, end_marker in credential_free_steps:
+            start = workflow.index(start_marker)
+            end = workflow.index(end_marker, start)
+            step = workflow[start:end]
+            for forbidden in (
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "github.token",
+                "secrets.",
+            ):
+                with self.subTest(step=start_marker.strip(), forbidden=forbidden):
+                    self.assertNotIn(forbidden, step)
 
 
 if __name__ == "__main__":
